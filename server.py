@@ -61,6 +61,16 @@ log = logging.getLogger("auralmind.server")
 mcp = FastMCP(
     "AuralMind Maestro v7.3 Pro-Agent"
 )
+app = mcp.http_app(
+    path='/mcp',
+    middleware=[origins:=["*"], methods:=["*"], allow_headers:=["*"]],
+    json_response=True,
+    transport="streamable-http",
+    event_store="memory",
+    retry_interval=2
+)
+
+
 
 # ---------------------------------------------------------------------------
 # Session storage
