@@ -46,9 +46,9 @@ from dataclasses import dataclass, field, replace
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, Optional
 
-from fastmcp import FastMCP, Lifespan
+from fastmcp import FastMCP
 
-import auralmind_maestro as maestro
+import tools.auralmind_maestro as maestro
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -59,9 +59,7 @@ log = logging.getLogger("auralmind.server")
 # FastMCP server instance
 # ---------------------------------------------------------------------------
 mcp = FastMCP(
-    "AuralMind Maestro v7.3 Pro-Agent",
-    lifespan=Lifespan.SESSION,
-    dependencies=["numpy", "scipy", "soundfile"],
+    "AuralMind Maestro v7.3 Pro-Agent"
 )
 
 # ---------------------------------------------------------------------------
@@ -574,4 +572,5 @@ if __name__ == "__main__":
         format="%(asctime)s  %(name)s  %(levelname)s  %(message)s",
         datefmt="%H:%M:%S",
     )
-    mcp.run(transport="stdio")
+    port = int(os.environ.get("PORT", "8000"))
+    mcp.run(transport="streamable-http", host="0.0.0.0", port=port)
