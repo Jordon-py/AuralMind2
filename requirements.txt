@@ -1,0 +1,9 @@
+demucs
+soundfile
+scipy
+numpy
+logging
+fastmcp
+asyncio
+pydantic
+pydantic-core

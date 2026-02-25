@@ -1,7 +1,7 @@
 [project]
-name = "weather"
-version = "0.1.0"
-description = "Add your description here"
+name = "auralmind_masters"
+version = "0.0.1"
+description = "Auralmind Masters MCP Server automates hifidelity mastering process"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
