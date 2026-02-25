@@ -47,6 +47,8 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, Optional
 
 from fastmcp import FastMCP
+from starlette.middleware import Middleware
+from starlette.middleware.cors import CORSMiddleware
 
 import tools.auralmind_maestro as maestro
 
@@ -61,13 +63,27 @@ log = logging.getLogger("auralmind.server")
 mcp = FastMCP(
     "AuralMind Maestro v7.3 Pro-Agent"
 )
+# NOTE: `mcp` is the FastMCP server object; `app` is the ASGI app for Uvicorn.
+# Run Uvicorn against `server:app` (not `server:mcp`).
+_http_middleware = [
+    Middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_headers=[
+            "mcp-protocol-version",
+            "mcp-session-id",
+            "Authorization",
+            "Content-Type",
+        ],
+        expose_headers=["mcp-session-id"],
+    )
+]
+
 app = mcp.http_app(
     path='/mcp',
-    middleware=[origins:=["*"], methods:=["*"], allow_headers:=["*"]],
+    middleware=_http_middleware,
     json_response=True,
-    transport="streamable-http",
-    event_store="memory",
-    retry_interval=2
 )
 
 
@@ -83,7 +99,7 @@ SYSTEM_PROMPT_PATH = os.path.join(
 )
 
 # ---------------------------------------------------------------------------
-# Upload safety cap (200 MB hex = 100 MB audio)
+# Upload safety cap (hex string length cap; ~200 MB decoded audio)
 # ---------------------------------------------------------------------------
 MAX_UPLOAD_HEX_CHARS = 200 * 1024 * 1024 * 2  # 200 MB after decode
 
@@ -263,7 +279,7 @@ def analyze_audio(server_path: str) -> Dict[str, Any]:
             "peak_dbfs": features["peak_dbfs"],
             "rms_dbfs": features["rms_dbfs"],
             "crest_db": features["crest_db"],
-            "corr_broadband": features["corr_hi"],
+            "corr_broadband": float(features.get("corr_hi", 0.0)),
             "corr_low": corr_lo,
             "sub_mono_ok": corr_lo >= 0.95,
             "centroid_hz": features["centroid_hz"],
