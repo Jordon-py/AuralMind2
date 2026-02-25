@@ -79,10 +79,10 @@ mpmath==1.3.0
 msgpack==1.1.2
 nest-asyncio==1.6.0
 networkx==3.6.1
-nflreadpy==0.1.5
+
 numba==0.63.1
 numpy==2.3.5
-ollama==0.6.1
+
 openapi-pydantic==0.5.1
 opentelemetry-api==1.39.1
 packaging==25.0
@@ -114,8 +114,8 @@ python-dateutil==2.9.0.post0
 python-dotenv==1.2.1
 python-multipart==0.0.20
 pytz==2025.2
-pywin32==311
-pywin32-ctypes==0.2.3
+
+
 PyYAML==6.0.3
 pyzmq==27.1.0
 referencing==0.37.0
