@@ -6,7 +6,6 @@ anyio==4.11.0
 APScheduler==3.11.2
 asttokens==3.0.1
 attrs==25.4.0
-audioop-lts
 audioread==3.1.0
 Authlib==1.6.8
 beartype==0.22.9
