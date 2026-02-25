@@ -8,7 +8,8 @@ mastering workflow for LLM clients.
 
 - 48 kHz mastering pipeline with float32/float64 export options.
 - Async job execution via background thread pool.
-- LLM-first control loop: upload -> analyze -> propose -> run -> poll -> result.
+- LLM-first control loop: upload -> analyze -> propose -> run -> poll -> result -> read.
+- Handle-based I/O (audio_id/artifact_id) with chunked artifact reads.
 - Optional Demucs stem separation when `torch` + `demucs` are available.
 
 ## Architecture
@@ -24,6 +25,7 @@ LLM client -> FastMCP (stdio)
               run_master_job
               job_status
               job_result
+              read_artifact
    DSP engine: tools/auralmind_maestro.py
 ```
 
@@ -58,7 +60,8 @@ Or with uv:
 uv run server.py
 ```
 
-The server writes session files into `./maestro_sessions`.
+The server writes session files into `./maestro_sessions/<session_hash>` and returns
+stable handles instead of filesystem paths.
 
 ## MCP resources and prompts
 
@@ -78,14 +81,27 @@ Returns a prompt that embeds the system prompt plus the provided metrics.
 
 ## Tools
 
+All tools return a consistent envelope:
+
+```json
+{
+  "ok": true,
+  "result": {},
+  "error": null
+}
+```
+
+On failure, `ok=false` and `error` includes `code`, `message`, and optional `details`.
+
 ### `upload_audio_to_session`
 
-Upload audio to the server and return a `server_path`.
+Upload audio to the server and return an `audio_id`.
 
 Parameters:
 
 - `filename` (str): original filename (used for display).
-- `hex_payload` (str): audio file encoded as hex.
+- `payload_b64` (str, preferred): audio file encoded as base64.
+- `hex_payload` (str, legacy): audio file encoded as hex.
 
 Notes:
 
@@ -97,7 +113,7 @@ Run pre-mastering analysis on the uploaded file.
 
 Parameters:
 
-- `server_path` (str): from `upload_audio_to_session`.
+- `audio_id` (str): from `upload_audio_to_session`.
 
 Returns:
 
@@ -134,7 +150,7 @@ Submit a non-blocking mastering job. Returns a `job_id`.
 
 Parameters:
 
-- `target_path` (str)
+- `audio_id` (str)
 - Same parameter set as `propose_master_settings`
 
 ### `job_status`
@@ -149,10 +165,24 @@ Fetch output once the job is `done`.
 
 Returns:
 
-- `file_uri` (mastered WAV path)
-- `report_uri` (Markdown report)
+- `artifacts` (list of `{artifact_id, filename, media_type, size_bytes, sha256}`)
 - `precision` (format string)
 - Final loudness and true-peak metrics
+
+### `read_artifact`
+
+Read artifact bytes in bounded base64 chunks.
+
+Parameters:
+
+- `artifact_id` (str): from `job_result` or `upload_audio_to_session`.
+- `offset` (int, optional): byte offset (default 0).
+- `length` (int, optional): bytes to read (default 1 MB, max 1 MB).
+
+Returns:
+
+- `data_b64` plus artifact metadata (`filename`, `media_type`, `size_bytes`, `sha256`)
+- `offset`, `length`, `is_last`
 
 ## DSP pipeline (tools/auralmind_maestro.py)
 
