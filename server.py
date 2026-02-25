@@ -51,7 +51,7 @@ import threading
 from dataclasses import dataclass, field, replace
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, Optional, Literal, Tuple, List
-
+import auralmind_match_maestro_v7_3
 from fastmcp import FastMCP
 from fastmcp.server.context import Context
 from pydantic import BaseModel, Field
@@ -107,9 +107,9 @@ SYSTEM_PROMPT_PATH = os.path.join(
 # ---------------------------------------------------------------------------
 # Upload safety cap (hex string length cap; ~200 MB decoded audio)
 # ---------------------------------------------------------------------------
-MAX_UPLOAD_BYTES = 200 * 1024 * 1024  # 200 MB after decode
+MAX_UPLOAD_BYTES = 400 * 1024 * 1024  # 400 MB after decode
 MAX_UPLOAD_HEX_CHARS = MAX_UPLOAD_BYTES * 2
-MAX_READ_BYTES = 1024 * 1024  # 1 MB chunks for artifact reads
+MAX_READ_BYTES = 2 * (1024 * 1024)  # 2 MB chunks for artifact reads
 
 HANDLE_RE = re.compile(r"^(aud|art|job)_[a-f0-9]{12}$")
 
@@ -250,13 +250,13 @@ class ArtifactReadResponse(BaseModel):
     result: Optional[ArtifactReadResult] = None
     error: Optional[ErrorInfo] = None
 
-
+@mcp.tool()
 def _ok(result: BaseModel | Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(result, BaseModel):
         result = result.model_dump()
     return {"ok": True, "result": result, "error": None}
 
-
+@mcp.tool()
 def _err(code: str, message: str, details: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     return {
         "ok": False,
@@ -264,11 +264,11 @@ def _err(code: str, message: str, details: Optional[Dict[str, Any]] = None) -> D
         "error": {"code": code, "message": message, "details": details},
     }
 
-
+@mcp.tool()
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
-
+@mcp.tool()
 def _valid_handle(handle: str, prefix: Optional[str] = None) -> bool:
     if not isinstance(handle, str) or not HANDLE_RE.match(handle):
         return False
@@ -276,7 +276,7 @@ def _valid_handle(handle: str, prefix: Optional[str] = None) -> bool:
         return True
     return handle.startswith(f"{prefix}_")
 
-
+@mcp.tool()
 def _sanitize_filename(name: str, fallback: str = "audio") -> str:
     base = os.path.basename(name or fallback)
     cleaned = "".join(
@@ -285,7 +285,7 @@ def _sanitize_filename(name: str, fallback: str = "audio") -> str:
     ).strip()
     return cleaned or fallback
 
-
+@mcp.tool()
 def _guess_media_type(filename: str, fallback: str = "application/octet-stream") -> str:
     ext = os.path.splitext(filename)[1].lower()
     if ext == ".wav":
@@ -302,7 +302,7 @@ def _guess_media_type(filename: str, fallback: str = "application/octet-stream")
         return "text/markdown"
     return fallback
 
-
+@mcp.tool()
 def _get_session_info(ctx: Optional[Context]) -> Tuple[str, str]:
     if ctx is not None and ctx.session_id:
         sid = str(ctx.session_id)
@@ -314,15 +314,15 @@ def _get_session_info(ctx: Optional[Context]) -> Tuple[str, str]:
     os.makedirs(session_dir, exist_ok=True)
     return session_key, session_dir
 
-
+@mcp.tool()
 def _artifact_meta_path(session_dir: str, artifact_id: str) -> str:
     return os.path.join(session_dir, f"{artifact_id}.json")
 
-
+@mcp.tool()
 def _artifact_data_path(session_dir: str, data_filename: str) -> str:
     return os.path.join(session_dir, data_filename)
 
-
+@mcp.tool()
 def _register_artifact(session_key: str, entry: ArtifactEntry, session_dir: str) -> None:
     with _ARTIFACTS_LOCK:
         _ARTIFACTS.setdefault(session_key, {})[entry.artifact_id] = entry
@@ -343,7 +343,7 @@ def _register_artifact(session_key: str, entry: ArtifactEntry, session_dir: str)
             indent=2,
         )
 
-
+@mcp.tool()
 def _load_artifact(session_key: str, session_dir: str, artifact_id: str) -> Optional[ArtifactEntry]:
     with _ARTIFACTS_LOCK:
         cached = _ARTIFACTS.get(session_key, {}).get(artifact_id)
@@ -368,7 +368,7 @@ def _load_artifact(session_key: str, session_dir: str, artifact_id: str) -> Opti
     _register_artifact(session_key, entry, session_dir)
     return entry
 
-
+@mcp.tool()
 def _store_bytes(
     session_key: str,
     session_dir: str,
@@ -399,7 +399,7 @@ def _store_bytes(
     _register_artifact(session_key, entry, session_dir)
     return entry
 
-
+@mcp.tool()
 def _register_existing_file(
     session_key: str,
     session_dir: str,
@@ -432,7 +432,15 @@ def _register_existing_file(
     _register_artifact(session_key, entry, session_dir)
     return entry
 
+@mcp.tool()
+def analyze_track_features(y: np.ndarray, sr: int) -> Dict[str, float]:
+    """
+    Lightweight analysis for auto-tuning and reporting.
+    USE BEFORE MASTER!
+    """
+    return auralmind_match_maestro_v7.analyze_track_features(y, sr)
 
+@mcp.tool()
 def _get_maestro() -> Tuple[Optional[Any], Optional[Dict[str, Any]]]:
     global _MAESTRO
     global _MAESTRO_ERROR
@@ -479,7 +487,7 @@ class JobState:
 
 _JOBS: Dict[str, JobState] = {}
 
-
+@mcp.tool()
 def _get_job(job_id: str, session_key: str) -> Optional[JobState]:
     with _JOBS_LOCK:
         job = _JOBS.get(job_id)
@@ -489,7 +497,7 @@ def _get_job(job_id: str, session_key: str) -> Optional[JobState]:
         return None
     return job
 
-
+@mcp.tool()
 def _set_job(job: JobState) -> None:
     with _JOBS_LOCK:
         _JOBS[job.job_id] = job
@@ -498,7 +506,7 @@ def _set_job(job: JobState) -> None:
 # ============================================================================
 # RESOURCE: System Prompt
 # ============================================================================
-@mcp.resource("config://system-prompt")
+@mcp.tool()@mcp.resource("config://system-prompt")
 def get_system_prompt() -> str:
     """Returns the AuralMind Cognitive Mastering system prompt.
 
@@ -513,7 +521,7 @@ def get_system_prompt() -> str:
 # ============================================================================
 # PROMPT: Mastering Strategy Generator
 # ============================================================================
-@mcp.prompt("generate-mastering-strategy")
+@mcp.tool()@mcp.prompt("generate-mastering-strategy")
 def generate_strategy(lufs: float, crest: float, platform: str) -> str:
     """Generates a mastering strategy prompt seeded with audio metrics.
 
@@ -545,7 +553,7 @@ Respond with the JSON strategy object.
 # ============================================================================
 # TOOL: upload_audio_to_session
 # ============================================================================
-@mcp.tool(exclude_args=["ctx"], output_schema=UploadResponse.model_json_schema())
+@mcp.tool()@mcp.tool(exclude_args=["ctx"], output_schema=UploadResponse.model_json_schema())
 def upload_audio_to_session(
     filename: str,
     hex_payload: Optional[str] = None,
@@ -635,7 +643,7 @@ def upload_audio_to_session(
 # ============================================================================
 # TOOL: analyze_audio
 # ============================================================================
-@mcp.tool(exclude_args=["ctx"], output_schema=AnalyzeResponse.model_json_schema())
+@mcp.tool()@mcp.tool(exclude_args=["ctx"], output_schema=AnalyzeResponse.model_json_schema())
 def analyze_audio(audio_id: str, ctx: Optional[Context] = None) -> Dict[str, Any]:
     """Comprehensive pre-mastering analysis — run BEFORE mastering.
 
@@ -699,7 +707,7 @@ def analyze_audio(audio_id: str, ctx: Optional[Context] = None) -> Dict[str, Any
 # ============================================================================
 # TOOL: list_presets
 # ============================================================================
-@mcp.tool(exclude_args=["ctx"], output_schema=PresetsResponse.model_json_schema())
+@mcp.tool()@mcp.tool(exclude_args=["ctx"], output_schema=PresetsResponse.model_json_schema())
 def list_presets(ctx: Optional[Context] = None) -> Dict[str, Any]:
     """List all available mastering presets with key parameters."""
     maestro, err = _get_maestro()
@@ -719,7 +727,7 @@ def list_presets(ctx: Optional[Context] = None) -> Dict[str, Any]:
         }
     return _ok(PresetsResult(presets=out))
 
-
+@mcp.tool()
 def _build_settings(
     maestro: Any,
     preset_name: str,
@@ -760,7 +768,7 @@ def _build_settings(
 # ============================================================================
 # TOOL: propose_master_settings
 # ============================================================================
-@mcp.tool(exclude_args=["ctx"], output_schema=SettingsResponse.model_json_schema())
+@mcp.tool()@mcp.tool(exclude_args=["ctx"], output_schema=SettingsResponse.model_json_schema())
 def propose_master_settings(
     preset_name: str = "hi_fi_streaming",
     target_lufs: float = -12.0,
@@ -793,7 +801,7 @@ def propose_master_settings(
 
 # ============================================================================
 # TOOL: run_master_job  (non-blocking — Enhancement B)
-# ============================================================================
+@mcp.tool()# ============================================================================
 def _run_master_worker(
     job: JobState,
     session_dir: str,
@@ -898,7 +906,7 @@ def _run_master_worker(
         log.exception("Job %s failed", job.job_id)
 
 
-@mcp.tool(exclude_args=["ctx"], output_schema=JobSubmitResponse.model_json_schema())
+@mcp.tool()@mcp.tool(exclude_args=["ctx"], output_schema=JobSubmitResponse.model_json_schema())
 def run_master_job(
     audio_id: str,
     preset_name: str = "hi_fi_streaming",
@@ -953,7 +961,7 @@ def run_master_job(
 # ============================================================================
 # TOOL: job_status
 # ============================================================================
-@mcp.tool(exclude_args=["ctx"], output_schema=JobStatusResponse.model_json_schema())
+@mcp.tool()@mcp.tool(exclude_args=["ctx"], output_schema=JobStatusResponse.model_json_schema())
 def job_status(job_id: str, ctx: Optional[Context] = None) -> Dict[str, Any]:
     """Check the current status of a mastering job."""
     if not _valid_handle(job_id, "job"):
@@ -977,7 +985,7 @@ def job_status(job_id: str, ctx: Optional[Context] = None) -> Dict[str, Any]:
 # ============================================================================
 # TOOL: job_result
 # ============================================================================
-@mcp.tool(exclude_args=["ctx"], output_schema=JobResultResponse.model_json_schema())
+@mcp.tool()@mcp.tool(exclude_args=["ctx"], output_schema=JobResultResponse.model_json_schema())
 def job_result(job_id: str, ctx: Optional[Context] = None) -> Dict[str, Any]:
     """Retrieve the final result of a completed mastering job."""
     if not _valid_handle(job_id, "job"):
@@ -1028,7 +1036,7 @@ def job_result(job_id: str, ctx: Optional[Context] = None) -> Dict[str, Any]:
 # ============================================================================
 # TOOL: read_artifact
 # ============================================================================
-@mcp.tool(exclude_args=["ctx"], output_schema=ArtifactReadResponse.model_json_schema())
+@mcp.tool()@mcp.tool(exclude_args=["ctx"], output_schema=ArtifactReadResponse.model_json_schema())
 def read_artifact(
     artifact_id: str,
     offset: int = 0,
