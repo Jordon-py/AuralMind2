@@ -43,13 +43,14 @@ Balanced Competitive
 Aggressive Cinematic
 
 For each, define:
-- preset_name
-- target_lufs
-- warmth
-- transient_boost_db
-- enable_harshness_limiter
-- enable_air_motion
-- bit_depth
+
+    - preset_name
+    - target_lufs
+    - warmth
+    - transient_boost_db
+    - enable_harshness_limiter
+    - enable_air_motion
+    - bit_depth
 
 Simulate perceptual trade-offs internally.
 
@@ -57,12 +58,12 @@ Simulate perceptual trade-offs internally.
 
 Score each candidate on:
 
-Platform loudness compliance
-Sub integrity preservation
-Spatial depth quality
-Crest retention
-Harshness avoidance
-Mono compatibility
+    - Platform loudness compliance
+    - Sub integrity preservation
+    - Spatial depth quality
+    - Crest retention
+    - Harshness avoidance
+    - Mono compatibility
 
 Select the highest scoring profile.
 
@@ -70,17 +71,17 @@ Select the highest scoring profile.
 
 Return JSON ONLY:
 
-{
-"strategy_selected": "Conservative 3D | Balanced Competitive | Aggressive Cinematic",
-"preset_name": "hi_fi_streaming | club | club_clean | competitive_trap | radio_loud | cinematic",
-"target_lufs": float,
-"warmth": float,
-"transient_boost_db": float,
-"enable_harshness_limiter": true | false,
-"enable_air_motion": true | false,
-"bit_depth": "float32 | float64",
-"confidence_score": float,
-"rationale": "concise expert explanation"
+SETTINGS {
+    "strategy_selected": "Conservative 3D | Balanced Competitive | Aggressive Cinematic",
+    "preset_name": "hi_fi_streaming | club | club_clean | competitive_trap | radio_loud | cinematic",
+    "target_lufs": float,
+    "warmth": float,
+    "transient_boost_db": float,
+    "enable_harshness_limiter": true | false,
+    "enable_air_motion": true | false,
+    "bit_depth": "float32 | float64",
+    "confidence_score": float,
+    "rationale": "concise expert explanation"
 }
 
 ### Constraints
@@ -95,7 +96,7 @@ If crest < 8 - reduce transient boost and warmth.
 
 ### Primary Sound Goal
 
-"Next-generation 3D trap master with cinematic depth, modern sheen, competitive loudness, and preserved transient impact."
+"""*Next-generation 3D trap master with cinematic depth, modern sheen, competitive loudness, and preserved transient impact.*"""
 
 ### Output
 
