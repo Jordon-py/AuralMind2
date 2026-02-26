@@ -16,7 +16,7 @@ mastering workflow for LLM clients.
 
 ```
 LLM client -> FastMCP (stdio)
-   resources: config://system-prompt
+   resources: config://system-prompt, config://mcp-docs, config://server-info
    prompts:   generate-mastering-strategy
    tools:     upload_audio_to_session
               analyze_audio
@@ -26,7 +26,7 @@ LLM client -> FastMCP (stdio)
               job_status
               job_result
               read_artifact
-   DSP engine: tools/auralmind_maestro.py
+   DSP engine: auralmind_match_maestro_v7_3.py
 ```
 
 ## Requirements
@@ -63,11 +63,21 @@ uv run server.py
 The server writes session files into `./maestro_sessions/<session_hash>` and returns
 stable handles instead of filesystem paths.
 
+For request/response examples, see `MCP.md`.
+
 ## MCP resources and prompts
 
 ### Resource: `config://system-prompt`
 
 Returns the cognitive mastering system prompt from `resources/system_prompt.md`.
+
+### Resource: `config://mcp-docs`
+
+Returns the LLM-facing MCP usage guide from `resources/mcp_docs.md`.
+
+### Resource: `config://server-info`
+
+Returns server limits and supported bit depth as JSON.
 
 ### Prompt: `generate-mastering-strategy`
 
@@ -105,7 +115,7 @@ Parameters:
 
 Notes:
 
-- The max payload is 200 MB after decode.
+- The max payload is 400 MB after decode.
 
 ### `analyze_audio`
 
@@ -138,11 +148,11 @@ Parameters:
 - `transient_boost_db` (float, 0.0 to 4.0)
 - `enable_harshness_limiter` (bool)
 - `enable_air_motion` (bool)
-- `bit_depth` (str, float32 or float64)
+- `bit_depth` (str, float32/float64)
 
 Returns:
 
-- `status` and `settings` (safe, clamped values)
+- `settings` (safe, clamped values)
 
 ### `run_master_job`
 
@@ -177,7 +187,7 @@ Parameters:
 
 - `artifact_id` (str): from `job_result` or `upload_audio_to_session`.
 - `offset` (int, optional): byte offset (default 0).
-- `length` (int, optional): bytes to read (default 1 MB, max 1 MB).
+- `length` (int, optional): bytes to read (default 2 MB, max 2 MB).
 
 Returns:
 
@@ -190,8 +200,8 @@ High-level stages:
 
 - Load audio and resample to 48 kHz
 - Feature analysis and preset selection
-- Dynamic masking EQ, de-ess, and harshness limiting
-- Stereo enhancements (spatial realism, CGMS microshift, air motion 3D)
+- Dynamic masking EQ, de-ess, and harmonic glow
+- Stereo enhancements (spatial realism, CGMS microshift, microdetail recovery)
 - Transient sculpt + movement automation + HookLift
 - Loudness governor, true-peak limiter, and export
 
@@ -208,10 +218,10 @@ High-level stages:
 
 ## CLI usage (standalone DSP)
 
-`tools/auralmind_maestro.py` can be used directly:
+`auralmind_match_maestro_v7_3.py` can be used directly:
 
 ```bash
-python tools/auralmind_maestro.py --target input.wav --out mastered.wav --preset hi_fi_streaming --report report.md
+python auralmind_match_maestro_v7_3.py --target input.wav --out mastered.wav --preset hi_fi_streaming --report report.md
 ```
 
 Common flags:
@@ -227,11 +237,14 @@ Common flags:
 ```
 AuralMind/
   server.py
+  auralmind_match_maestro_v7_3.py
   tools/
     auralmind_maestro.py
     test_pipeline.py
   resources/
     system_prompt.md
+    mcp_docs.md
+  MCP.md
   requirements.txt
   pyproject.toml
   README.md
@@ -249,16 +262,14 @@ Import and function availability check:
 
 ```bash
 python - <<'PY'
-import auralmind_maestro as m
+import tools.auralmind_maestro as m
 required = [
     "load_audio",
     "analyze_track_features",
     "auto_select_preset_name",
     "auto_tune_preset",
     "dynamic_masking_eq",
-    "harshness_limiter",
     "microshift_widen_side",
-    "air_motion_3d",
     "get_presets",
     "master",
     "write_audio",

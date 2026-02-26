@@ -1,10 +1,14 @@
+from __future__ import annotations
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-
-
 """
-AuralMind Match — Maestro v7.3 "expert" (Expert-tier)
+
+IMPORTANT!!!: (
+    THIS IS TO BE USED WITH MCP FOR AURALMIND AS THE MAIN MASTERING ENGINE
+    THE MCP WILL CALL THIS SCRIPT AND PASS THE ARGUMENTS AND RUN IT AS A STANDALONE SCRIPT
+)
+
 ======================================================
 
 Goal
@@ -12,7 +16,7 @@ Goal
 Reference-based (or curve-based) mastering with *closed-loop* controls that protect
 "pre-loudness openness" at loud playback, while still achieving competitive loudness.
 
-What's new vs earlier generations
+WHAT IT DOES
 ---------------------------------
 1) Loudness Governor: Automatically backs off LUFS target if limiting would exceed a safe GR ceiling.
 2) Mono-Sub v2: Note-aware cutoff (derived from detected sub fundamental) + adaptive mono mix.
@@ -31,52 +35,46 @@ What's new vs earlier generations
    - Batched vectorized FFT magnitude analysis (fewer Python loops).
    - Cached DSP coefficients + LUFS baseline reuse inside governor search.
 
-Dependencies
-------------
-- numpy
-- scipy
-- soundfile
-
-No librosa / numba required. (This script stays lightweight and portable.)
-
 Usage
 -----
 Basic (curve-based master):
-    python auralmind_match_maestro_nextgen_v7_3_expert.py --target "song.wav" --out "song_master.wav"
+    python auralmind_maestro.py --target "song.wav" --out "song_master.wav"
 
 Reference match:
-    python auralmind_match_maestro_nextgen_v7_3_expert.py --reference "ref.mp3" --target "song.wav" --out "song_master.wav"
+    python auralmind_maestro.py --reference "ref.mp3" --target "song.wav" --out "song_master.wav"
 
 Choose a preset:
-    python auralmind_match_maestro_nextgen_v7_3_expert.py --preset hi_fi_streaming --target "song.wav" --out "song_master.wav"
+    python auralmind_maestro.py --preset hi_fi_streaming --target "song.wav" --out "song_master.wav"
 
 Notes
 -----
 - Default sample rate is 48000 Hz (streaming-friendly, modern production workflows).
 - True-peak limiting is approximated via oversampling peak detection + smooth gain.
-  For mission-critical mastering, a dedicated TP limiter is still recommended, but this is robust enough for real work.
+- DEMUCS IS ENABLED BY DEFAULT
+- AFTER LLM ANALYSIS, THE MCP WILL CALL THIS SCRIPT AND PASS THE ARGUMENTS AND RUN IT AS A STANDALONE SCRIPT
+
+
 """
 
-from __future__ import annotations
 
+import os
 import argparse
 import json
 import logging
 import math
-import os
 import time
-from dataclasses import dataclass, replace
-from functools import lru_cache
-from typing import Optional, Tuple, Dict, Any, Union
-
+import uuid
 import numpy as np
 import scipy
 import scipy.signal as sps
 import soundfile as sf
-from scipy.ndimage import maximum_filter1d
 from scipy.signal import fftconvolve
+from functools import lru_cache
+from scipy.ndimage import maximum_filter1d
+from typing import Optional, Tuple, Dict, Any, Union, Literal
+from pydantic import BaseModel, Field, ConfigDict
 
-# Optional Demucs (HT-Demucs stem separation) — enabled by default, with graceful fallback
+# Demucs (HT-Demucs stem separation) — enabled by default, LLM MAY DISABLE IT IF NOT NEEDED
 try:
     import torch  # type: ignore
     from demucs import pretrained  # type: ignore
@@ -437,7 +435,7 @@ def auto_tune_preset(
     else:
         gr_limit = float(base_preset.governor_gr_limit_db)
 
-    tuned = tuned.__class__(**{**tuned.__dict__, "target_lufs": target_lufs, "governor_gr_limit_db": gr_limit})
+    tuned = tuned.model_copy(update={"target_lufs": target_lufs, "governor_gr_limit_db": gr_limit})
     info["target_lufs"] = target_lufs
     info["gr_limit_db"] = gr_limit
     info["crest_db"] = crest
@@ -1879,105 +1877,105 @@ def stem_pre_master_pass(stem: np.ndarray, sr: int, stem_name: str, preset: "Pre
 
 # Master pipeline
 # ---------------------------
+class Preset(BaseModel):
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+    id: str = Field(default_factory=lambda: uuid.uuid4())
+    name: str = Field(default="AuralMind Settings")
 
-@dataclass
-class Preset:
-    name: str
-    target_lufs: float = -12.3
-    ceiling_dbfs: float = -1.0
-    sr: int = 48000
-
-    fir_taps: int = 4097
-    match_strength: float = 0.62
-    hi_factor: float = 0.75
-    max_eq_db: float = 6.0
-    eq_smooth_hz: float = 100.0
+    target_lufs: float = Field(default=-12.5, ge=-18.0, le=-9.0)
+    ceiling_dbfs: float = Field(default=-1.0, ge=-10.0, le=0.0)
+    sr: int = Field(default=48000, ge=8000, le=192000)
+    fir_taps: int = Field(default=4097, ge=512, le=16384)
+    match_strength: float = Field(default=0.62, ge=0.0, le=1.0)
+    hi_factor: float = Field(default=0.75, ge=0.0, le=2.0)
+    max_eq_db: float = Field(default=6.0, ge=0.0, le=12.0)
+    eq_smooth_hz: float = Field(default=100.0, ge=20.0, le=500.0)
 
     enable_masking_eq: bool = True
-    masking_eq_max_dip_db: float = 1.5
+    masking_eq_max_dip_db: float = Field(default=1.5, ge=0.0, le=6.0)
     enable_deess: bool = True
-    deess_threshold_db: float = -18.0
-    deess_ratio: float = 3.0
-    deess_mix: float = 0.55
+    deess_threshold_db: float = Field(default=-18.0, ge=-60.0, le=0.0)
+    deess_ratio: float = Field(default=3.0, ge=1.0, le=12.0)
+    deess_mix: float = Field(default=0.55, ge=0.0, le=1.0)
 
     enable_glow: bool = True
-    glow_drive_db: float = 0.9
-    glow_mix: float = 0.55
+    glow_drive_db: float = Field(default=0.9, ge=0.0, le=6.0)
+    glow_mix: float = Field(default=0.55, ge=0.0, le=1.0)
 
     enable_mono_sub_v2: bool = True
-    mono_sub_base_mix: float = 0.55  # actual mix becomes adaptive
+    mono_sub_base_mix: float = Field(default=0.55, ge=0.0, le=1.0)  # actual mix becomes adaptive
 
     enable_spatial: bool = True
-    width_mid: float = 1.06
-    width_hi: float = 1.28
+    width_mid: float = Field(default=1.06, ge=0.5, le=2.0)
+    width_hi: float = Field(default=1.28, ge=0.5, le=2.0)
 
     enable_microshift: bool = True
-    microshift_ms: float = 0.22
-    microshift_mix: float = 0.18
+    microshift_ms: float = Field(default=0.22, ge=0.0, le=5.0)
+    microshift_mix: float = Field(default=0.18, ge=0.0, le=1.0)
 
-    limiter_oversample: int = 4
-    limiter_attack_ms: float = 1.0
-    limiter_release_ms: float = 60.0
-    limiter_mode: str = "v2"
-    limiter_lookahead_ms: float = 3.0
-    limiter_stereo_link: float = 0.92
+    limiter_oversample: int = Field(default=4, ge=1, le=16)
+    limiter_attack_ms: float = Field(default=1.0, ge=0.1, le=20.0)
+    limiter_release_ms: float = Field(default=60.0, ge=5.0, le=500.0)
+    limiter_mode: Literal["v1", "v2"] = "v2"
+    limiter_lookahead_ms: float = Field(default=3.0, ge=0.0, le=10.0)
+    limiter_stereo_link: float = Field(default=0.92, ge=0.0, le=1.0)
 
     enable_limiter: bool = True
     enable_softclip: bool = True
-    softclip_pre_db_below_ceiling: float = 0.6
-    softclip_drive_db: float = 1.2
-    softclip_mix: float = 0.25
+    softclip_pre_db_below_ceiling: float = Field(default=0.6, ge=0.0, le=3.0)
+    softclip_drive_db: float = Field(default=1.2, ge=0.0, le=6.0)
+    softclip_mix: float = Field(default=0.25, ge=0.0, le=1.0)
 
     # FIR streaming (match-EQ)
-    fir_streaming: str = "auto"   # auto | on | off
-    fir_block_pow2: int = 17      # 2^17 = 131072 samples per block
+    fir_streaming: Literal["auto", "on", "off"] = "auto"   # auto | on | off
+    fir_block_pow2: int = Field(default=17, ge=12, le=20)  # 2^17 = 131072 samples per block
 
     # Micro-detail recovery (SIDE high-band upward micro-comp)
     enable_microdetail: bool = True
-    microdetail_amount: float = 0.22
-    microdetail_threshold_db: float = -34.0
-    microdetail_max_boost_db: float = 3.5
-    microdetail_band_lo_hz: float = 2500.0
-    microdetail_band_hi_hz: float = 12000.0
-    microdetail_mix: float = 0.65
+    microdetail_amount: float = Field(default=0.22, ge=0.0, le=1.0)
+    microdetail_threshold_db: float = Field(default=-34.0, ge=-80.0, le=0.0)
+    microdetail_max_boost_db: float = Field(default=3.5, ge=0.0, le=12.0)
+    microdetail_band_lo_hz: float = Field(default=2500.0, ge=100.0, le=20000.0)
+    microdetail_band_hi_hz: float = Field(default=12000.0, ge=1000.0, le=24000.0)
+    microdetail_mix: float = Field(default=0.65, ge=0.0, le=1.0)
 
     # Governor v2 (binary search)
-    governor_search_steps: int = 11
-    governor_allow_above_db: float = 0.0
+    governor_search_steps: int = Field(default=11, ge=3, le=32)
+    governor_allow_above_db: float = Field(default=0.0, ge=0.0, le=6.0)
 
     # HT-Demucs stem separation (run early)
     enable_stem_separation: bool = True
     demucs_model: str = "htdemucs"
     demucs_device: str = "cpu"
     demucs_split: bool = True
-    demucs_overlap: float = 0.25
-    demucs_shifts: int = 1
+    demucs_overlap: float = Field(default=0.25, ge=0.0, le=0.99)
+    demucs_shifts: int = Field(default=1, ge=0, le=10)
 
     # Movement + HookLift (section-aware)
     enable_movement: bool = True
-    movement_amount: float = 0.10
+    movement_amount: float = Field(default=0.10, ge=0.0, le=0.35)
     enable_hooklift: bool = True
     hooklift_auto: bool = True
-    hooklift_auto_percentile: float = 75.0
-    hooklift_mix: float = 0.22
+    hooklift_auto_percentile: float = Field(default=75.0, ge=50.0, le=95.0)
+    hooklift_mix: float = Field(default=0.22, ge=0.0, le=0.65)
 
     # Transient sculpt (pre-limiter punch preservation)
     enable_transient_sculpt: bool = True
-    transient_sculpt_boost_db: float = 2.4
-    transient_sculpt_mix: float = 0.38
-    transient_sculpt_crest_guard_db: float = 17.5
-    transient_sculpt_decay_ms: float = 5.5
+    transient_sculpt_boost_db: float = Field(default=2.4, ge=0.0, le=6.0)
+    transient_sculpt_mix: float = Field(default=0.38, ge=0.0, le=1.0)
+    transient_sculpt_crest_guard_db: float = Field(default=17.5, ge=6.0, le=30.0)
+    transient_sculpt_decay_ms: float = Field(default=5.5, ge=1.0, le=30.0)
 
     # Analog Warmth (tilt EQ)
-    warmth: float = 0.0
+    warmth: float = Field(default=0.0, ge=0.0, le=1.0)
 
     # Loudness governor
-    governor_iters: int = 3
-    governor_gr_limit_db: float = -3.0  # Quality ceiling: keep average GR above this
-    governor_step_db: float = -0.6      # lower bound for search step
-    governor_lufs_tolerance: float = 0.5   # stop when |post - target| <= tol
-    governor_comp_db: float = 6.0          # allow searching ABOVE target to compensate limiter pull-down
-    governor_min_gain_floor_db: float = -12.0 # Hard safety floor for peak gain reduction
+    governor_iters: int = Field(default=3, ge=1, le=8)
+    governor_gr_limit_db: float = Field(default=-3.0, ge=-6.0, le=0.0)  # Quality ceiling: keep average GR above this
+    governor_step_db: float = Field(default=-0.6, ge=-6.0, le=0.0)      # lower bound for search step
+    governor_lufs_tolerance: float = Field(default=0.5, ge=0.1, le=2.0)  # stop when |post - target| <= tol
+    governor_comp_db: float = Field(default=6.0, ge=0.0, le=12.0)        # allow searching ABOVE target to compensate limiter pull-down
+    governor_min_gain_floor_db: float = Field(default=-12.0, ge=-24.0, le=0.0)  # Hard safety floor for peak gain reduction
 
 def get_presets() -> Dict[str, Preset]:
     return {
@@ -2445,7 +2443,7 @@ def master(target_path: str, out_path: str, preset: Preset,
         return y_lim, lim_stats
 
     # GEA: Governor Excerpt Analysis
-    # We find the loudest 45s of the track to perform the search; 
+    # We find the loudest 45s of the track to perform the search;
     # this makes iterations 10x faster on a typical 5min song.
     log.info("[master] identifying loudest sector for governor search...")
     y_excerpt = find_loudest_excerpt(y, sr_t, duration=45.0)
@@ -2784,7 +2782,7 @@ def main():
 
 
     if updates:
-        preset = replace(preset, **updates)
+        preset = preset.model_copy(update=updates)
 
     dither_flag = False if bool(args.no_dither) else None
     res = master(
