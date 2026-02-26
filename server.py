@@ -1,39 +1,28 @@
+
 """
-AuralMind Maestro — FastMCP Server
-===================================
+AuralMind Maestro - FastMCP Server
+=================================
 
 Production-grade MCP server exposing the AuralMind mastering DSP pipeline
-as LLM-callable tools.  Designed for non-blocking operation: heavy mastering
-jobs run in a background thread-pool, while lightweight analysis and
+as LLM-callable tools. Designed for non-blocking operation: heavy mastering
+jobs run in a background thread pool, while lightweight analysis and
 validation tools respond immediately.
 
 Architecture
 ------------
 
-    LLM client ──→ FastMCP (stdio / streamable-HTTP)
-                     ├── resources/  config://system-prompt
-                     ├── prompts/    generate-mastering-strategy
-                     └── tools/
-                          ├── upload_audio_to_session   (sync,  ~instant)
-                          ├── analyze_audio             (sync,  ~2 s)
-                          ├── list_presets               (sync,  instant)
-                          ├── propose_master_settings    (sync,  instant)
-                          ├── run_master_job             (async, returns job_id)
-                          ├── job_status                 (sync,  instant)
-                          ├── job_result                 (sync,  instant)
-                          └── read_artifact              (sync,  chunked download)
-
-Mastering Control Loop
-----------------------
-
-    1.  upload_audio_to_session(file)   →  audio_id
-    2.  analyze_audio(audio_id)         →  metrics + recommended preset
-    3.  LLM reasons over metrics (optionally calls generate-mastering-strategy)
-    4.  propose_master_settings(...)    →  validated settings JSON
-    5.  run_master_job(audio_id, settings)  →  job_id  (non-blocking)
-    6.  job_status(job_id)              →  progress / stage description
-    7.  job_result(job_id)              →  final metrics + artifact handles
-    8.  read_artifact(artifact_id)      →  base64 chunks (audio/report)
+    LLM client -> FastMCP (stdio / streamable-HTTP)
+                     -> resources/  config://system-prompt, config://mcp-docs
+                     -> prompts/    generate-mastering-strategy
+                     -> tools/
+                          -> upload_audio_to_session   (sync,  ~instant)
+                          -> analyze_audio             (sync,  ~2 s)
+                          -> list_presets              (sync,  instant)
+                          -> propose_master_settings   (sync,  instant)
+                          -> run_master_job            (async, returns job_id)
+                          -> job_status                (sync,  instant)
+                          -> job_result                (sync,  instant)
+                          -> read_artifact             (sync,  chunked download)
 """
 
 from __future__ import annotations
@@ -41,34 +30,38 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
-import os
 import json
-import re
-import uuid
-import time
 import logging
+import os
+import re
 import threading
-from dataclasses import dataclass, field, replace
+import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, Any, Optional, Literal, Tuple, List
-import auralmind_match_maestro_v7_3
-from fastmcp import FastMCP
-from fastmcp.server.context import Context
-from pydantic import BaseModel, Field
+from dataclasses import dataclass, field, replace
+from typing import Any, Dict, List, Optional, Tuple, Literal, Annotated, TypeVar
+
+from fastmcp import FastMCP, Context
+from fastmcp.prompts import Message, PromptResult
+from pydantic import BaseModel, Field, ConfigDict
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 log = logging.getLogger("auralmind.server")
+
+SERVER_NAME = "AuralMind Maestro v7.3 Pro-Agent"
+Platform = Literal["spotify", "apple_music", "youtube", "soundcloud", "club"]
+BitDepth = Literal["float32", "float64"]
 
 # ---------------------------------------------------------------------------
 # FastMCP server instance
 # ---------------------------------------------------------------------------
 mcp = FastMCP(
-    "AuralMind Maestro v7.3 Pro-Agent"
+    SERVER_NAME,
+    on_duplicate_tools="error",
+    on_duplicate_resources="error",
+    on_duplicate_prompts="error",
 )
 
 _http_middleware = [
@@ -87,12 +80,10 @@ _http_middleware = [
 ]
 
 app = mcp.http_app(
-    path='/mcp',
+    path="/mcp",
     middleware=_http_middleware,
     json_response=True,
 )
-
-
 
 # ---------------------------------------------------------------------------
 # Session storage
@@ -103,172 +94,247 @@ os.makedirs(STORAGE_DIR, exist_ok=True)
 SYSTEM_PROMPT_PATH = os.path.join(
     os.path.dirname(__file__), "resources", "system_prompt.md"
 )
+MCP_DOCS_PATH = os.path.join(
+    os.path.dirname(__file__), "resources", "mcp_docs.md"
+)
 
 # ---------------------------------------------------------------------------
-# Upload safety cap (hex string length cap; ~200 MB decoded audio)
+# Upload safety caps
 # ---------------------------------------------------------------------------
 MAX_UPLOAD_BYTES = 400 * 1024 * 1024  # 400 MB after decode
 MAX_UPLOAD_HEX_CHARS = MAX_UPLOAD_BYTES * 2
-MAX_READ_BYTES = 2 * (1024 * 1024)  # 2 MB chunks for artifact reads
-
+MAX_READ_BYTES = 2 * 1024 * 1024  # 2 MB chunks for artifact reads
 HANDLE_RE = re.compile(r"^(aud|art|job)_[a-f0-9]{12}$")
 
 _ARTIFACTS_LOCK = threading.Lock()
 _ARTIFACTS: Dict[str, Dict[str, "ArtifactEntry"]] = {}
-
 _MAESTRO_LOCK = threading.Lock()
 _MAESTRO: Optional[Any] = None
 _MAESTRO_ERROR: Optional[Dict[str, Any]] = None
 
 
-@dataclass
-class ArtifactEntry:
-    artifact_id: str
-    kind: str
-    filename: str
-    media_type: str
-    size_bytes: int
-    sha256: str
-    data_filename: str
-    created_at: float = field(default_factory=time.time)
+# ---------------------------------------------------------------------------
+# Pydantic models
+# ---------------------------------------------------------------------------
+class StrictBaseModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
-class ErrorInfo(BaseModel):
+class ErrorInfo(StrictBaseModel):
     code: str = Field(..., description="Machine-readable error code.")
     message: str = Field(..., description="Human-readable error message.")
     details: Optional[Dict[str, Any]] = Field(
-        default=None, description="Optional structured error details."
+        default=None,
+        description="Optional structured error details.",
     )
 
 
-class ArtifactRef(BaseModel):
-    artifact_id: str
-    filename: str
-    media_type: str
-    size_bytes: int
-    sha256: str
+class BaseEnvelope(StrictBaseModel):
+    ok: bool = Field(..., description="True when the tool call succeeded.")
+    error: Optional[ErrorInfo] = Field(
+        default=None,
+        description="Error details when ok=false.",
+    )
 
 
-class UploadResult(BaseModel):
-    audio_id: str
-    filename: str
-    size_bytes: int
-    sha256: str
-    media_type: str
+class ArtifactRef(StrictBaseModel):
+    artifact_id: str = Field(..., description="Artifact handle.")
+    filename: str = Field(..., description="Stored filename.")
+    media_type: str = Field(..., description="MIME type.")
+    size_bytes: int = Field(..., description="Artifact size in bytes.")
+    sha256: str = Field(..., description="SHA-256 hash of the artifact.")
 
 
-class UploadResponse(BaseModel):
-    ok: bool
-    result: Optional[UploadResult] = None
-    error: Optional[ErrorInfo] = None
+class UploadResult(StrictBaseModel):
+    audio_id: str = Field(..., description="Server-side handle for the uploaded audio.")
+    filename: str = Field(..., description="Sanitized filename stored on the server.")
+    size_bytes: int = Field(..., description="Payload size in bytes.")
+    sha256: str = Field(..., description="SHA-256 hash of the payload.")
+    media_type: str = Field(..., description="Detected media type.")
 
 
-class AnalyzeResult(BaseModel):
-    audio_id: str
-    metrics: Dict[str, Any]
+class UploadResponse(BaseEnvelope):
+    result: Optional[UploadResult] = Field(
+        default=None,
+        description="Upload payload metadata.",
+    )
 
 
-class AnalyzeResponse(BaseModel):
-    ok: bool
-    result: Optional[AnalyzeResult] = None
-    error: Optional[ErrorInfo] = None
+class AudioMetrics(StrictBaseModel):
+    lufs_i: float = Field(..., description="Integrated loudness (LUFS).")
+    tp_dbfs: float = Field(..., description="True peak in dBFS.")
+    peak_dbfs: float = Field(..., description="Peak level in dBFS.")
+    rms_dbfs: float = Field(..., description="RMS level in dBFS.")
+    crest_db: float = Field(..., description="Crest factor in dB.")
+    corr_broadband: float = Field(..., description="Broadband correlation.")
+    corr_low: float = Field(..., description="Low-band correlation.")
+    sub_mono_ok: bool = Field(..., description="True if sub region is mono-safe.")
+    centroid_hz: float = Field(..., description="Spectral centroid in Hz.")
+    recommended_preset: str = Field(..., description="Recommended preset name.")
+    recommended_lufs: float = Field(..., description="Recommended LUFS target.")
+    sample_rate: int = Field(..., description="Sample rate in Hz.")
+    duration_s: float = Field(..., description="Duration in seconds.")
 
 
-class PresetsResult(BaseModel):
-    presets: Dict[str, Any]
+class AnalyzeResult(StrictBaseModel):
+    audio_id: str = Field(..., description="Audio handle that was analyzed.")
+    metrics: AudioMetrics = Field(..., description="Analysis metrics.")
 
 
-class PresetsResponse(BaseModel):
-    ok: bool
-    result: Optional[PresetsResult] = None
-    error: Optional[ErrorInfo] = None
+class AnalyzeResponse(BaseEnvelope):
+    result: Optional[AnalyzeResult] = Field(default=None, description="Analysis result.")
 
 
-class SettingsResult(BaseModel):
-    settings: Dict[str, Any]
+class PresetSummary(StrictBaseModel):
+    target_lufs: float = Field(..., description="Target LUFS for the preset.")
+    ceiling_dbfs: float = Field(..., description="Limiter ceiling in dBFS.")
+    limiter_mode: str = Field(..., description="Limiter engine name.")
+    governor_gr_limit_db: float = Field(..., description="Governor GR limit in dB.")
+    match_strength: float = Field(..., description="Match EQ strength.")
+    enable_harshness_limiter: bool = Field(..., description="Harshness limiter toggle.")
 
 
-class SettingsResponse(BaseModel):
-    ok: bool
-    result: Optional[SettingsResult] = None
-    error: Optional[ErrorInfo] = None
+class PresetsResult(StrictBaseModel):
+    presets: Dict[str, PresetSummary] = Field(
+        ...,
+        description="Preset map keyed by name.",
+    )
 
 
-class JobSubmitResult(BaseModel):
-    job_id: str
-    status: str
-    audio_id: str
+class PresetsResponse(BaseEnvelope):
+    result: Optional[PresetsResult] = Field(default=None, description="Preset list.")
 
 
-class JobSubmitResponse(BaseModel):
-    ok: bool
-    result: Optional[JobSubmitResult] = None
-    error: Optional[ErrorInfo] = None
+class MasterSettings(StrictBaseModel):
+    preset_name: str = Field(..., description="Preset name to start from.")
+    target_lufs: float = Field(..., description="Target integrated loudness (LUFS).")
+    warmth: float = Field(..., ge=0.0, le=1.0, description="Analog warmth amount.")
+    transient_boost_db: float = Field(
+        ...,
+        ge=0.0,
+        le=4.0,
+        description="Transient sculpt boost.",
+    )
+    enable_harshness_limiter: bool = Field(
+        ...,
+        description="Enable harshness limiter.",
+    )
+    enable_air_motion: bool = Field(
+        ...,
+        description="Enable air motion stage.",
+    )
+    bit_depth: BitDepth = Field(..., description="Export bit depth.")
+    subtype: str = Field(..., description="libsndfile subtype used for export.")
 
 
-class JobStatusResult(BaseModel):
-    job_id: str
-    status: str
-    progress: str
-    elapsed_s: float
+class SettingsResult(StrictBaseModel):
+    settings: MasterSettings = Field(
+        ...,
+        description="Validated mastering settings.",
+    )
 
 
-class JobStatusResponse(BaseModel):
-    ok: bool
-    result: Optional[JobStatusResult] = None
-    error: Optional[ErrorInfo] = None
+class SettingsResponse(BaseEnvelope):
+    result: Optional[SettingsResult] = Field(
+        default=None,
+        description="Settings preview.",
+    )
 
 
-class JobResultResult(BaseModel):
-    job_id: str
-    status: str
-    artifacts: List[ArtifactRef]
-    metrics: Dict[str, Any]
-    precision: str
+class JobSubmitResult(StrictBaseModel):
+    job_id: str = Field(..., description="Background job handle.")
+    status: str = Field(..., description="Initial job status.")
+    audio_id: str = Field(..., description="Audio handle submitted.")
 
 
-class JobResultResponse(BaseModel):
-    ok: bool
-    result: Optional[JobResultResult] = None
-    error: Optional[ErrorInfo] = None
+class JobSubmitResponse(BaseEnvelope):
+    result: Optional[JobSubmitResult] = Field(
+        default=None,
+        description="Job submission result.",
+    )
 
 
-class ArtifactReadResult(BaseModel):
-    artifact_id: str
-    filename: str
-    media_type: str
-    size_bytes: int
-    sha256: str
-    offset: int
-    length: int
-    is_last: bool
-    data_b64: str
+class JobStatusResult(StrictBaseModel):
+    job_id: str = Field(..., description="Job handle.")
+    status: str = Field(..., description="Job status.")
+    progress: str = Field(..., description="Human-readable progress message.")
+    elapsed_s: float = Field(..., description="Seconds since job submission.")
 
 
-class ArtifactReadResponse(BaseModel):
-    ok: bool
-    result: Optional[ArtifactReadResult] = None
-    error: Optional[ErrorInfo] = None
+class JobStatusResponse(BaseEnvelope):
+    result: Optional[JobStatusResult] = Field(
+        default=None,
+        description="Job status payload.",
+    )
 
-@mcp.tool()
-def _ok(result: BaseModel | Dict[str, Any]) -> Dict[str, Any]:
-    if isinstance(result, BaseModel):
-        result = result.model_dump()
-    return {"ok": True, "result": result, "error": None}
 
-@mcp.tool()
-def _err(code: str, message: str, details: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    return {
-        "ok": False,
-        "result": None,
-        "error": {"code": code, "message": message, "details": details},
-    }
+class JobResultResult(StrictBaseModel):
+    job_id: str = Field(..., description="Job handle.")
+    status: str = Field(..., description="Final job status.")
+    artifacts: List[ArtifactRef] = Field(
+        ...,
+        description="Output artifact references.",
+    )
+    metrics: Dict[str, Any] = Field(
+        ...,
+        description="Final mastering metrics.",
+    )
+    precision: str = Field(..., description="Export precision string.")
 
-@mcp.tool()
+
+class JobResultResponse(BaseEnvelope):
+    result: Optional[JobResultResult] = Field(
+        default=None,
+        description="Job output payload.",
+    )
+
+
+class ArtifactReadResult(StrictBaseModel):
+    artifact_id: str = Field(..., description="Artifact handle.")
+    filename: str = Field(..., description="Stored filename.")
+    media_type: str = Field(..., description="MIME type.")
+    size_bytes: int = Field(..., description="Artifact size in bytes.")
+    sha256: str = Field(..., description="SHA-256 hash of the artifact.")
+    offset: int = Field(..., description="Byte offset for this chunk.")
+    length: int = Field(..., description="Length of this chunk in bytes.")
+    is_last: bool = Field(..., description="True if this is the final chunk.")
+    data_b64: str = Field(..., description="Base64-encoded chunk bytes.")
+
+
+class ArtifactReadResponse(BaseEnvelope):
+    result: Optional[ArtifactReadResult] = Field(
+        default=None,
+        description="Artifact chunk payload.",
+    )
+
+
+ResponseT = TypeVar("ResponseT", bound=BaseEnvelope)
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+def _ok(response_model: type[ResponseT], result: BaseModel | Dict[str, Any]) -> ResponseT:
+    return response_model(ok=True, result=result, error=None)
+
+
+def _err(
+    response_model: type[ResponseT],
+    code: str,
+    message: str,
+    details: Optional[Dict[str, Any]] = None,
+) -> ResponseT:
+    return response_model(
+        ok=False,
+        result=None,
+        error=ErrorInfo(code=code, message=message, details=details),
+    )
+
+
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
-@mcp.tool()
+
 def _valid_handle(handle: str, prefix: Optional[str] = None) -> bool:
     if not isinstance(handle, str) or not HANDLE_RE.match(handle):
         return False
@@ -276,7 +342,7 @@ def _valid_handle(handle: str, prefix: Optional[str] = None) -> bool:
         return True
     return handle.startswith(f"{prefix}_")
 
-@mcp.tool()
+
 def _sanitize_filename(name: str, fallback: str = "audio") -> str:
     base = os.path.basename(name or fallback)
     cleaned = "".join(
@@ -285,8 +351,11 @@ def _sanitize_filename(name: str, fallback: str = "audio") -> str:
     ).strip()
     return cleaned or fallback
 
-@mcp.tool()
-def _guess_media_type(filename: str, fallback: str = "application/octet-stream") -> str:
+
+def _guess_media_type(
+    filename: str,
+    fallback: str = "application/octet-stream",
+) -> str:
     ext = os.path.splitext(filename)[1].lower()
     if ext == ".wav":
         return "audio/wav"
@@ -302,7 +371,7 @@ def _guess_media_type(filename: str, fallback: str = "application/octet-stream")
         return "text/markdown"
     return fallback
 
-@mcp.tool()
+
 def _get_session_info(ctx: Optional[Context]) -> Tuple[str, str]:
     if ctx is not None and ctx.session_id:
         sid = str(ctx.session_id)
@@ -314,16 +383,16 @@ def _get_session_info(ctx: Optional[Context]) -> Tuple[str, str]:
     os.makedirs(session_dir, exist_ok=True)
     return session_key, session_dir
 
-@mcp.tool()
+
 def _artifact_meta_path(session_dir: str, artifact_id: str) -> str:
     return os.path.join(session_dir, f"{artifact_id}.json")
 
-@mcp.tool()
+
 def _artifact_data_path(session_dir: str, data_filename: str) -> str:
     return os.path.join(session_dir, data_filename)
 
-@mcp.tool()
-def _register_artifact(session_key: str, entry: ArtifactEntry, session_dir: str) -> None:
+
+def _register_artifact(session_key: str, entry: "ArtifactEntry", session_dir: str) -> None:
     with _ARTIFACTS_LOCK:
         _ARTIFACTS.setdefault(session_key, {})[entry.artifact_id] = entry
     meta_path = _artifact_meta_path(session_dir, entry.artifact_id)
@@ -343,8 +412,12 @@ def _register_artifact(session_key: str, entry: ArtifactEntry, session_dir: str)
             indent=2,
         )
 
-@mcp.tool()
-def _load_artifact(session_key: str, session_dir: str, artifact_id: str) -> Optional[ArtifactEntry]:
+
+def _load_artifact(
+    session_key: str,
+    session_dir: str,
+    artifact_id: str,
+) -> Optional["ArtifactEntry"]:
     with _ARTIFACTS_LOCK:
         cached = _ARTIFACTS.get(session_key, {}).get(artifact_id)
     if cached is not None:
@@ -368,7 +441,7 @@ def _load_artifact(session_key: str, session_dir: str, artifact_id: str) -> Opti
     _register_artifact(session_key, entry, session_dir)
     return entry
 
-@mcp.tool()
+
 def _store_bytes(
     session_key: str,
     session_dir: str,
@@ -378,7 +451,7 @@ def _store_bytes(
     filename: str,
     payload: bytes,
     media_type: str,
-) -> ArtifactEntry:
+) -> "ArtifactEntry":
     safe_name = _sanitize_filename(filename)
     ext = os.path.splitext(safe_name)[1].lower() or ".bin"
     data_filename = f"{artifact_id}{ext}"
@@ -399,7 +472,7 @@ def _store_bytes(
     _register_artifact(session_key, entry, session_dir)
     return entry
 
-@mcp.tool()
+
 def _register_existing_file(
     session_key: str,
     session_dir: str,
@@ -409,7 +482,7 @@ def _register_existing_file(
     filename: str,
     data_filename: str,
     media_type: str,
-) -> ArtifactEntry:
+) -> "ArtifactEntry":
     data_path = _artifact_data_path(session_dir, data_filename)
     sha = hashlib.sha256()
     size = 0
@@ -432,15 +505,7 @@ def _register_existing_file(
     _register_artifact(session_key, entry, session_dir)
     return entry
 
-@mcp.tool()
-def analyze_track_features(y: np.ndarray, sr: int) -> Dict[str, float]:
-    """
-    Lightweight analysis for auto-tuning and reporting.
-    USE BEFORE MASTER!
-    """
-    return auralmind_match_maestro_v7.analyze_track_features(y, sr)
 
-@mcp.tool()
 def _get_maestro() -> Tuple[Optional[Any], Optional[Dict[str, Any]]]:
     global _MAESTRO
     global _MAESTRO_ERROR
@@ -462,6 +527,44 @@ def _get_maestro() -> Tuple[Optional[Any], Optional[Dict[str, Any]]]:
         _MAESTRO = maestro
         return _MAESTRO, None
 
+
+def _build_settings(
+    maestro: Any,
+    preset_name: str,
+    target_lufs: float,
+    warmth: float,
+    transient_boost_db: float,
+    enable_harshness_limiter: bool,
+    enable_air_motion: bool,
+    bit_depth: str,
+) -> Tuple[Optional[MasterSettings], Optional[ErrorInfo]]:
+    presets = maestro.get_presets()
+    if preset_name not in presets:
+        return None, ErrorInfo(
+            code="invalid_preset",
+            message="Invalid preset.",
+            details={"available": list(presets.keys())},
+        )
+
+    warmth_val = max(0.0, min(1.0, float(warmth)))
+    transient_val = max(0.0, min(4.0, float(transient_boost_db)))
+    bit_depth_val = str(bit_depth)
+    if bit_depth_val not in ("float32", "float64"):
+        bit_depth_val = "float32"
+
+    settings = MasterSettings(
+        preset_name=preset_name,
+        target_lufs=float(target_lufs),
+        warmth=warmth_val,
+        transient_boost_db=transient_val,
+        enable_harshness_limiter=bool(enable_harshness_limiter),
+        enable_air_motion=bool(enable_air_motion),
+        bit_depth=bit_depth_val,  # type: ignore[arg-type]
+        subtype="FLOAT" if bit_depth_val == "float32" else "DOUBLE",
+    )
+    return settings, None
+
+
 # ---------------------------------------------------------------------------
 # Async Job Infrastructure
 # ---------------------------------------------------------------------------
@@ -476,18 +579,18 @@ class JobState:
     job_id: str
     session_key: str
     audio_id: str
-    status: str = "queued"  # queued → running → done | error
+    status: str = "queued"  # queued -> running -> done | error
     progress: str = "Waiting in queue"
     created_at: float = field(default_factory=time.time)
     result: Optional[Dict[str, Any]] = None
-    artifacts: List[ArtifactEntry] = field(default_factory=list)
+    artifacts: List["ArtifactEntry"] = field(default_factory=list)
     precision: str = "48000Hz / float32"
     error: Optional[str] = None
 
 
 _JOBS: Dict[str, JobState] = {}
 
-@mcp.tool()
+
 def _get_job(job_id: str, session_key: str) -> Optional[JobState]:
     with _JOBS_LOCK:
         job = _JOBS.get(job_id)
@@ -497,318 +600,31 @@ def _get_job(job_id: str, session_key: str) -> Optional[JobState]:
         return None
     return job
 
-@mcp.tool()
+
 def _set_job(job: JobState) -> None:
     with _JOBS_LOCK:
         _JOBS[job.job_id] = job
 
 
-# ============================================================================
-# RESOURCE: System Prompt
-# ============================================================================
-@mcp.tool()@mcp.resource("config://system-prompt")
-def get_system_prompt() -> str:
-    """Returns the AuralMind Cognitive Mastering system prompt.
-
-    This resource provides the full system prompt that instructs the LLM
-    on how to act as a mastering engineer.  The LLM should read this once
-    at conversation start to understand its role and output format.
-    """
-    with open(SYSTEM_PROMPT_PATH, "r", encoding="utf-8") as f:
-        return f.read()
+@dataclass
+class ArtifactEntry:
+    artifact_id: str
+    kind: str
+    filename: str
+    media_type: str
+    size_bytes: int
+    sha256: str
+    data_filename: str
+    created_at: float = field(default_factory=time.time)
 
 
-# ============================================================================
-# PROMPT: Mastering Strategy Generator
-# ============================================================================
-@mcp.tool()@mcp.prompt("generate-mastering-strategy")
-def generate_strategy(lufs: float, crest: float, platform: str) -> str:
-    """Generates a mastering strategy prompt seeded with audio metrics.
-
-    The LLM calls this after ``analyze_audio`` to get a prompt that
-    combines the system prompt with the track's measured metrics.
-    The LLM should then respond with a JSON strategy object as
-    specified in the system prompt.
-
-    Args:
-        lufs:     Integrated loudness of the input track (LUFS).
-        crest:    Crest factor of the input track (dB).
-        platform: Target platform (e.g. 'spotify', 'apple_music', 'club').
-    """
-    prompt_content = get_system_prompt()
-    return f"""\
-{prompt_content}
-
-INPUT_METRICS:
-{{
-    "lufs": {lufs},
-    "crest_db": {crest},
-    "platform": "{platform}"
-}}
-
-Respond with the JSON strategy object.
-"""
-
-
-# ============================================================================
-# TOOL: upload_audio_to_session
-# ============================================================================
-@mcp.tool()@mcp.tool(exclude_args=["ctx"], output_schema=UploadResponse.model_json_schema())
-def upload_audio_to_session(
-    filename: str,
-    hex_payload: Optional[str] = None,
-    payload_b64: Optional[str] = None,
-    ctx: Optional[Context] = None,
-) -> Dict[str, Any]:
-    """Upload an audio file to the server before analysis or mastering.
-
-    The LLM **must** call this first to transfer the user's audio file
-    to the server. The returned ``audio_id`` is required by
-    ``analyze_audio`` and ``run_master_job``.
-
-    Args:
-        filename:    Original filename (e.g. ``'my_beat.wav'``). Used for
-                     display only; the server generates a unique safe name.
-        hex_payload: Entire audio file encoded as a hex string (legacy).
-        payload_b64: Entire audio file encoded as base64 (preferred).
-
-    Returns:
-        Envelope with ``audio_id`` on success, or a machine-readable error.
-    """
-    if hex_payload and payload_b64:
-        return _err(
-            "ambiguous_payload",
-            "Provide only one payload encoding.",
-            {"allowed": ["hex_payload", "payload_b64"]},
-        )
-    if not hex_payload and not payload_b64:
-        return _err(
-            "missing_payload",
-            "Provide hex_payload or payload_b64.",
-            {"allowed": ["hex_payload", "payload_b64"]},
-        )
-
-    try:
-        if hex_payload:
-            if len(hex_payload) > MAX_UPLOAD_HEX_CHARS:
-                return _err(
-                    "payload_too_large",
-                    "Payload exceeds 200 MB limit after decoding.",
-                    {"limit_bytes": MAX_UPLOAD_BYTES},
-                )
-            payload = bytes.fromhex(hex_payload)
-        else:
-            payload = base64.b64decode(payload_b64 or "", validate=True)
-    except (ValueError, binascii.Error) as exc:
-        return _err("invalid_payload", "Payload decoding failed.", {"error": str(exc)})
-
-    if len(payload) > MAX_UPLOAD_BYTES:
-        return _err(
-            "payload_too_large",
-            "Payload exceeds 200 MB limit after decoding.",
-            {"limit_bytes": MAX_UPLOAD_BYTES},
-        )
-
-    session_key, session_dir = _get_session_info(ctx)
-    audio_id = _new_id("aud")
-    safe_name = _sanitize_filename(filename)
-    media_type = _guess_media_type(safe_name)
-
-    try:
-        entry = _store_bytes(
-            session_key,
-            session_dir,
-            artifact_id=audio_id,
-            kind="audio",
-            filename=safe_name,
-            payload=payload,
-            media_type=media_type,
-        )
-    except Exception as exc:
-        log.exception("Upload failed for %s", filename)
-        return _err("upload_failed", "Upload failed.", {"error": str(exc)})
-
-    log.info("Uploaded %s -> %s (%s bytes)", filename, audio_id, entry.size_bytes)
-    return _ok(
-        UploadResult(
-            audio_id=entry.artifact_id,
-            filename=entry.filename,
-            size_bytes=entry.size_bytes,
-            sha256=entry.sha256,
-            media_type=entry.media_type,
-        )
-    )
-
-
-# ============================================================================
-# TOOL: analyze_audio
-# ============================================================================
-@mcp.tool()@mcp.tool(exclude_args=["ctx"], output_schema=AnalyzeResponse.model_json_schema())
-def analyze_audio(audio_id: str, ctx: Optional[Context] = None) -> Dict[str, Any]:
-    """Comprehensive pre-mastering analysis — run BEFORE mastering.
-
-    Args:
-        audio_id: Server-side audio handle returned by ``upload_audio_to_session``.
-
-    Returns:
-        Envelope with analysis metrics or a machine-readable error.
-    """
-    if not _valid_handle(audio_id, "aud"):
-        return _err("invalid_audio_id", "audio_id format is invalid.", {"audio_id": audio_id})
-
-    session_key, session_dir = _get_session_info(ctx)
-    entry = _load_artifact(session_key, session_dir, audio_id)
-    if entry is None or entry.kind != "audio":
-        return _err("not_found", "Audio not found.", {"audio_id": audio_id})
-
-    data_path = _artifact_data_path(session_dir, entry.data_filename)
-    if not os.path.exists(data_path):
-        return _err("not_found", "Audio file missing.", {"audio_id": audio_id})
-
-    maestro, err = _get_maestro()
-    if err is not None:
-        return _err(err["code"], err["message"], err.get("details"))
-
-    try:
-        y, sr = maestro.load_audio(data_path)
-        features = maestro.analyze_track_features(y, sr)
-
-        corr_lo = float(features.get("corr_lo", 0.0))
-        preset_name = maestro.auto_select_preset_name(features)
-        presets = maestro.get_presets()
-        recommended_lufs = (
-            float(presets[preset_name].target_lufs)
-            if preset_name in presets
-            else -12.0
-        )
-
-        metrics = {
-            "lufs_i": features["lufs"],
-            "tp_dbfs": features["tp_dbfs"],
-            "peak_dbfs": features["peak_dbfs"],
-            "rms_dbfs": features["rms_dbfs"],
-            "crest_db": features["crest_db"],
-            "corr_broadband": float(features.get("corr_hi", 0.0)),
-            "corr_low": corr_lo,
-            "sub_mono_ok": corr_lo >= 0.95,
-            "centroid_hz": features["centroid_hz"],
-            "recommended_preset": preset_name,
-            "recommended_lufs": recommended_lufs,
-            "sample_rate": int(sr),
-            "duration_s": round(len(y) / sr, 2),
-        }
-
-        return _ok(AnalyzeResult(audio_id=audio_id, metrics=metrics))
-    except Exception as exc:
-        log.exception("Analysis failed for %s", audio_id)
-        return _err("analysis_failed", "Analysis failed.", {"error": str(exc)})
-
-
-# ============================================================================
-# TOOL: list_presets
-# ============================================================================
-@mcp.tool()@mcp.tool(exclude_args=["ctx"], output_schema=PresetsResponse.model_json_schema())
-def list_presets(ctx: Optional[Context] = None) -> Dict[str, Any]:
-    """List all available mastering presets with key parameters."""
-    maestro, err = _get_maestro()
-    if err is not None:
-        return _err(err["code"], err["message"], err.get("details"))
-
-    presets = maestro.get_presets()
-    out: Dict[str, Any] = {}
-    for name, p in presets.items():
-        out[name] = {
-            "target_lufs": p.target_lufs,
-            "ceiling_dbfs": p.ceiling_dbfs,
-            "limiter_mode": p.limiter_mode,
-            "governor_gr_limit_db": p.governor_gr_limit_db,
-            "match_strength": p.match_strength,
-            "enable_harshness_limiter": p.enable_harshness_limiter,
-        }
-    return _ok(PresetsResult(presets=out))
-
-@mcp.tool()
-def _build_settings(
-    maestro: Any,
-    preset_name: str,
-    target_lufs: float,
-    warmth: float,
-    transient_boost_db: float,
-    enable_harshness_limiter: bool,
-    enable_air_motion: bool,
-    bit_depth: str,
-) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
-    presets = maestro.get_presets()
-    if preset_name not in presets:
-        return None, _err(
-            "invalid_preset",
-            "Invalid preset.",
-            {"available": list(presets.keys())},
-        )
-
-    warmth_val = max(0.0, min(1.0, float(warmth)))
-    transient_val = max(0.0, min(4.0, float(transient_boost_db)))
-    bit_depth_val = str(bit_depth)
-    if bit_depth_val not in ("float32", "float64"):
-        bit_depth_val = "float32"
-
-    settings = {
-        "preset_name": preset_name,
-        "target_lufs": float(target_lufs),
-        "warmth": warmth_val,
-        "transient_boost_db": transient_val,
-        "enable_harshness_limiter": bool(enable_harshness_limiter),
-        "enable_air_motion": bool(enable_air_motion),
-        "bit_depth": bit_depth_val,
-        "subtype": "FLOAT" if bit_depth_val == "float32" else "DOUBLE",
-    }
-    return settings, None
-
-
-# ============================================================================
-# TOOL: propose_master_settings
-# ============================================================================
-@mcp.tool()@mcp.tool(exclude_args=["ctx"], output_schema=SettingsResponse.model_json_schema())
-def propose_master_settings(
-    preset_name: str = "hi_fi_streaming",
-    target_lufs: float = -12.0,
-    warmth: float = 0.5,
-    transient_boost_db: float = 1.0,
-    enable_harshness_limiter: bool = True,
-    enable_air_motion: bool = True,
-    bit_depth: str = "float32",
-    ctx: Optional[Context] = None,
-) -> Dict[str, Any]:
-    """Validate and preview mastering settings before submitting a job."""
-    maestro, err = _get_maestro()
-    if err is not None:
-        return _err(err["code"], err["message"], err.get("details"))
-
-    settings, err_payload = _build_settings(
-        maestro,
-        preset_name,
-        target_lufs,
-        warmth,
-        transient_boost_db,
-        enable_harshness_limiter,
-        enable_air_motion,
-        bit_depth,
-    )
-    if err_payload is not None:
-        return err_payload
-    return _ok(SettingsResult(settings=settings))
-
-
-# ============================================================================
-# TOOL: run_master_job  (non-blocking — Enhancement B)
-@mcp.tool()# ============================================================================
 def _run_master_worker(
     job: JobState,
     session_dir: str,
     audio_entry: ArtifactEntry,
-    settings: Dict[str, Any],
+    settings: MasterSettings,
 ) -> None:
-    """Background worker — runs inside ThreadPoolExecutor."""
+    """Background worker - runs inside ThreadPoolExecutor."""
     maestro, err = _get_maestro()
     if err is not None:
         job.status = "error"
@@ -823,29 +639,21 @@ def _run_master_worker(
         _set_job(job)
 
         presets = maestro.get_presets()
-        preset_name = settings.get("preset_name", "hi_fi_streaming")
+        preset_name = settings.preset_name or "hi_fi_streaming"
         preset = presets[preset_name]
 
-        # AI overrides
-        updates: Dict[str, Any] = {}
-        if "target_lufs" in settings:
-            updates["target_lufs"] = float(settings["target_lufs"])
-        if "warmth" in settings:
-            updates["warmth"] = max(0.0, min(1.0, float(settings["warmth"])))
-        if "transient_boost_db" in settings:
-            updates["transient_sculpt_boost_db"] = max(
-                0.0, min(4.0, float(settings["transient_boost_db"]))
-            )
-        updates["enable_harshness_limiter"] = settings.get(
-            "enable_harshness_limiter", True
-        )
-        updates["enable_air_motion"] = settings.get("enable_air_motion", True)
-        updates["bit_depth"] = settings.get("bit_depth", "float32")
+        updates: Dict[str, Any] = {
+            "target_lufs": float(settings.target_lufs),
+            "warmth": float(settings.warmth),
+            "transient_sculpt_boost_db": float(settings.transient_boost_db),
+            "enable_harshness_limiter": bool(settings.enable_harshness_limiter),
+            "enable_air_motion": bool(settings.enable_air_motion),
+            "bit_depth": settings.bit_depth,
+        }
 
         preset = replace(preset, **updates)
 
-        # Export paths
-        bit_depth = settings.get("bit_depth", "float32")
+        bit_depth = settings.bit_depth
         subtype = "FLOAT" if bit_depth == "float32" else "DOUBLE"
         audio_artifact_id = _new_id("art")
         report_artifact_id = _new_id("art")
@@ -906,36 +714,333 @@ def _run_master_worker(
         log.exception("Job %s failed", job.job_id)
 
 
-@mcp.tool()@mcp.tool(exclude_args=["ctx"], output_schema=JobSubmitResponse.model_json_schema())
-def run_master_job(
-    audio_id: str,
-    preset_name: str = "hi_fi_streaming",
-    target_lufs: float = -12.0,
-    warmth: float = 0.5,
-    transient_boost_db: float = 1.0,
-    enable_harshness_limiter: bool = True,
-    enable_air_motion: bool = True,
-    bit_depth: str = "float32",
-    ctx: Optional[Context] = None,
-) -> Dict[str, Any]:
-    """Submit a mastering job to the background thread pool (non-blocking)."""
+# ===========================================================================
+# RESOURCES
+# ===========================================================================
+@mcp.resource(
+    uri="config://system-prompt",
+    name="SystemPrompt",
+    description="Cognitive mastering system prompt.",
+    mime_type="text/markdown",
+    annotations={"readOnlyHint": True, "idempotentHint": True},
+    tags={"config"},
+)
+def get_system_prompt() -> str:
+    """Returns the AuralMind Cognitive Mastering system prompt."""
+    with open(SYSTEM_PROMPT_PATH, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+@mcp.resource(
+    uri="config://mcp-docs",
+    name="McpDocs",
+    description="LLM-facing MCP usage guide for AuralMind Maestro.",
+    mime_type="text/markdown",
+    annotations={"readOnlyHint": True, "idempotentHint": True},
+    tags={"config", "docs"},
+)
+def get_mcp_docs() -> str:
+    """Returns the MCP usage guide bundled with the server."""
+    with open(MCP_DOCS_PATH, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+@mcp.resource(
+    uri="config://server-info",
+    name="ServerInfo",
+    description="Server configuration and limits.",
+    mime_type="application/json",
+    annotations={"readOnlyHint": True, "idempotentHint": True},
+    tags={"config"},
+)
+def get_server_info() -> str:
+    """Provides server metadata and limits as JSON."""
+    payload = {
+        "name": SERVER_NAME,
+        "max_upload_bytes": MAX_UPLOAD_BYTES,
+        "max_read_bytes": MAX_READ_BYTES,
+        "supported_bit_depths": ["float32", "float64"],
+    }
+    return json.dumps(payload, indent=2)
+
+
+# ===========================================================================
+# PROMPTS
+# ===========================================================================
+@mcp.prompt(
+    name="generate-mastering-strategy",
+    description="Builds a mastering-strategy prompt seeded with analysis metrics.",
+    tags={"mastering", "prompt"},
+)
+def generate_strategy(
+    lufs: Annotated[float, Field(description="Integrated loudness (LUFS).")],
+    crest: Annotated[float, Field(description="Crest factor (dB).")],
+    platform: Annotated[Platform, Field(description="Target platform.")],
+) -> PromptResult:
+    """Generates a prompt with the system instructions and measured metrics."""
+    prompt_content = get_system_prompt()
+    metrics = {
+        "lufs": float(lufs),
+        "crest_db": float(crest),
+        "platform": platform,
+    }
+    prompt = (
+        f"{prompt_content}\n\n"
+        f"INPUT_METRICS:\n{json.dumps(metrics, indent=2)}\n\n"
+        "Respond with the JSON strategy object."
+    )
+    return PromptResult(
+        messages=[Message(prompt)],
+        description="Mastering strategy prompt with embedded metrics.",
+        meta={"platform": platform},
+    )
+
+
+# ===========================================================================
+# TOOLS
+# ===========================================================================
+@mcp.tool()
+def upload_audio_to_session(
+    filename: Annotated[
+        str,
+        Field(description="Original filename (used for display).", min_length=1),
+    ],
+    payload_b64: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Base64-encoded audio payload (preferred).",
+        ),
+    ] = None,
+    hex_payload: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Hex-encoded audio payload (legacy).",
+        ),
+    ] = None,
+    ctx: Context = None,
+) -> UploadResponse:
+    """Upload an audio file to the server before analysis or mastering."""
+    if hex_payload and payload_b64:
+        return _err(
+            UploadResponse,
+            "ambiguous_payload",
+            "Provide only one payload encoding.",
+            {"allowed": ["hex_payload", "payload_b64"]},
+        )
+    if not hex_payload and not payload_b64:
+        return _err(
+            UploadResponse,
+            "missing_payload",
+            "Provide hex_payload or payload_b64.",
+            {"allowed": ["hex_payload", "payload_b64"]},
+        )
+
+    try:
+        if hex_payload:
+            if len(hex_payload) > MAX_UPLOAD_HEX_CHARS:
+                return _err(
+                    UploadResponse,
+                    "payload_too_large",
+                    "Payload exceeds upload limit after decoding.",
+                    {"limit_bytes": MAX_UPLOAD_BYTES},
+                )
+            payload = bytes.fromhex(hex_payload)
+        else:
+            payload = base64.b64decode(payload_b64 or "", validate=True)
+    except (ValueError, binascii.Error) as exc:
+        return _err(
+            UploadResponse,
+            "invalid_payload",
+            "Payload decoding failed.",
+            {"error": str(exc)},
+        )
+
+    if len(payload) > MAX_UPLOAD_BYTES:
+        return _err(
+            UploadResponse,
+            "payload_too_large",
+            "Payload exceeds upload limit after decoding.",
+            {"limit_bytes": MAX_UPLOAD_BYTES},
+        )
+
+    session_key, session_dir = _get_session_info(ctx)
+    audio_id = _new_id("aud")
+    safe_name = _sanitize_filename(filename)
+    media_type = _guess_media_type(safe_name)
+
+    try:
+        entry = _store_bytes(
+            session_key,
+            session_dir,
+            artifact_id=audio_id,
+            kind="audio",
+            filename=safe_name,
+            payload=payload,
+            media_type=media_type,
+        )
+    except Exception as exc:
+        log.exception("Upload failed for %s", filename)
+        return _err(
+            UploadResponse,
+            "upload_failed",
+            "Upload failed.",
+            {"error": str(exc)},
+        )
+
+    log.info("Uploaded %s -> %s (%s bytes)", filename, audio_id, entry.size_bytes)
+    return _ok(
+        UploadResponse,
+        UploadResult(
+            audio_id=entry.artifact_id,
+            filename=entry.filename,
+            size_bytes=entry.size_bytes,
+            sha256=entry.sha256,
+            media_type=entry.media_type,
+        ),
+    )
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False})
+def analyze_audio(
+    audio_id: Annotated[
+        str,
+        Field(
+            description="Audio handle returned by upload_audio_to_session.",
+            pattern=r"^aud_[a-f0-9]{12}$",
+        ),
+    ],
+    ctx: Context = None,
+) -> AnalyzeResponse:
+    """Comprehensive pre-mastering analysis - run BEFORE mastering."""
     if not _valid_handle(audio_id, "aud"):
-        return _err("invalid_audio_id", "audio_id format is invalid.", {"audio_id": audio_id})
+        return _err(
+            AnalyzeResponse,
+            "invalid_audio_id",
+            "audio_id format is invalid.",
+            {"audio_id": audio_id},
+        )
 
     session_key, session_dir = _get_session_info(ctx)
     entry = _load_artifact(session_key, session_dir, audio_id)
     if entry is None or entry.kind != "audio":
-        return _err("not_found", "Audio not found.", {"audio_id": audio_id})
+        return _err(AnalyzeResponse, "not_found", "Audio not found.", {"audio_id": audio_id})
 
     data_path = _artifact_data_path(session_dir, entry.data_filename)
     if not os.path.exists(data_path):
-        return _err("not_found", "Audio file missing.", {"audio_id": audio_id})
+        return _err(
+            AnalyzeResponse,
+            "not_found",
+            "Audio file missing.",
+            {"audio_id": audio_id},
+        )
 
     maestro, err = _get_maestro()
     if err is not None:
-        return _err(err["code"], err["message"], err.get("details"))
+        return _err(AnalyzeResponse, err["code"], err["message"], err.get("details"))
 
-    settings, err_payload = _build_settings(
+    try:
+        y, sr = maestro.load_audio(data_path)
+        features = maestro.analyze_track_features(y, sr)
+
+        corr_lo = float(features.get("corr_lo", 0.0))
+        preset_name = maestro.auto_select_preset_name(features)
+        presets = maestro.get_presets()
+        recommended_lufs = (
+            float(presets[preset_name].target_lufs)
+            if preset_name in presets
+            else -12.0
+        )
+
+        metrics = AudioMetrics(
+            lufs_i=float(features["lufs"]),
+            tp_dbfs=float(features["tp_dbfs"]),
+            peak_dbfs=float(features["peak_dbfs"]),
+            rms_dbfs=float(features["rms_dbfs"]),
+            crest_db=float(features["crest_db"]),
+            corr_broadband=float(features.get("corr_hi", 0.0)),
+            corr_low=corr_lo,
+            sub_mono_ok=corr_lo >= 0.95,
+            centroid_hz=float(features["centroid_hz"]),
+            recommended_preset=preset_name,
+            recommended_lufs=recommended_lufs,
+            sample_rate=int(sr),
+            duration_s=round(len(y) / sr, 2),
+        )
+
+        return _ok(
+            AnalyzeResponse,
+            AnalyzeResult(audio_id=audio_id, metrics=metrics),
+        )
+    except Exception as exc:
+        log.exception("Analysis failed for %s", audio_id)
+        return _err(
+            AnalyzeResponse,
+            "analysis_failed",
+            "Analysis failed.",
+            {"error": str(exc)},
+        )
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False})
+def list_presets() -> PresetsResponse:
+    """List all available mastering presets with key parameters."""
+    maestro, err = _get_maestro()
+    if err is not None:
+        return _err(PresetsResponse, err["code"], err["message"], err.get("details"))
+
+    presets = maestro.get_presets()
+    out: Dict[str, PresetSummary] = {}
+    for name, p in presets.items():
+        out[name] = PresetSummary(
+            target_lufs=float(p.target_lufs),
+            ceiling_dbfs=float(p.ceiling_dbfs),
+            limiter_mode=str(getattr(p, "limiter_mode", "v2")),
+            governor_gr_limit_db=float(p.governor_gr_limit_db),
+            match_strength=float(p.match_strength),
+            enable_harshness_limiter=bool(p.enable_harshness_limiter),
+        )
+    return _ok(PresetsResponse, PresetsResult(presets=out))
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False})
+def propose_master_settings(
+    preset_name: Annotated[
+        str,
+        Field(description="Preset name to use as a baseline."),
+    ] = "hi_fi_streaming",
+    target_lufs: Annotated[
+        float,
+        Field(description="Target integrated loudness (LUFS)."),
+    ] = -12.0,
+    warmth: Annotated[
+        float,
+        Field(description="Analog warmth amount (0.0-1.0).", ge=0.0, le=1.0),
+    ] = 0.5,
+    transient_boost_db: Annotated[
+        float,
+        Field(description="Transient sculpt boost in dB (0.0-4.0).", ge=0.0, le=4.0),
+    ] = 1.0,
+    enable_harshness_limiter: Annotated[
+        bool,
+        Field(description="Enable harshness limiter stage."),
+    ] = True,
+    enable_air_motion: Annotated[
+        bool,
+        Field(description="Enable air motion stage."),
+    ] = True,
+    bit_depth: Annotated[
+        BitDepth,
+        Field(description="Export bit depth."),
+    ] = "float32",
+) -> SettingsResponse:
+    """Validate and preview mastering settings before submitting a job."""
+    maestro, err = _get_maestro()
+    if err is not None:
+        return _err(SettingsResponse, err["code"], err["message"], err.get("details"))
+
+    settings, err_info = _build_settings(
         maestro,
         preset_name,
         target_lufs,
@@ -945,8 +1050,94 @@ def run_master_job(
         enable_air_motion,
         bit_depth,
     )
-    if err_payload is not None:
-        return err_payload
+    if err_info is not None:
+        return SettingsResponse(ok=False, result=None, error=err_info)
+    return _ok(SettingsResponse, SettingsResult(settings=settings))
+
+
+@mcp.tool()
+def run_master_job(
+    audio_id: Annotated[
+        str,
+        Field(
+            description="Audio handle returned by upload_audio_to_session.",
+            pattern=r"^aud_[a-f0-9]{12}$",
+        ),
+    ],
+    preset_name: Annotated[
+        str,
+        Field(description="Preset name to use as a baseline."),
+    ] = "hi_fi_streaming",
+    target_lufs: Annotated[
+        float,
+        Field(description="Target integrated loudness (LUFS)."),
+    ] = -12.0,
+    warmth: Annotated[
+        float,
+        Field(description="Analog warmth amount (0.0-1.0).", ge=0.0, le=1.0),
+    ] = 0.5,
+    transient_boost_db: Annotated[
+        float,
+        Field(description="Transient sculpt boost in dB (0.0-4.0).", ge=0.0, le=4.0),
+    ] = 1.0,
+    enable_harshness_limiter: Annotated[
+        bool,
+        Field(description="Enable harshness limiter stage."),
+    ] = True,
+    enable_air_motion: Annotated[
+        bool,
+        Field(description="Enable air motion stage."),
+    ] = True,
+    bit_depth: Annotated[
+        BitDepth,
+        Field(description="Export bit depth."),
+    ] = "float32",
+    ctx: Context = None,
+) -> JobSubmitResponse:
+    """Submit a mastering job to the background thread pool (non-blocking)."""
+    if not _valid_handle(audio_id, "aud"):
+        return _err(
+            JobSubmitResponse,
+            "invalid_audio_id",
+            "audio_id format is invalid.",
+            {"audio_id": audio_id},
+        )
+
+    session_key, session_dir = _get_session_info(ctx)
+    entry = _load_artifact(session_key, session_dir, audio_id)
+    if entry is None or entry.kind != "audio":
+        return _err(
+            JobSubmitResponse,
+            "not_found",
+            "Audio not found.",
+            {"audio_id": audio_id},
+        )
+
+    data_path = _artifact_data_path(session_dir, entry.data_filename)
+    if not os.path.exists(data_path):
+        return _err(
+            JobSubmitResponse,
+            "not_found",
+            "Audio file missing.",
+            {"audio_id": audio_id},
+        )
+
+    maestro, err = _get_maestro()
+    if err is not None:
+        return _err(JobSubmitResponse, err["code"], err["message"], err.get("details"))
+
+    settings, err_info = _build_settings(
+        maestro,
+        preset_name,
+        target_lufs,
+        warmth,
+        transient_boost_db,
+        enable_harshness_limiter,
+        enable_air_motion,
+        bit_depth,
+    )
+    if err_info is not None:
+        return JobSubmitResponse(ok=False, result=None, error=err_info)
 
     job_id = _new_id("job")
     job = JobState(job_id=job_id, session_key=session_key, audio_id=audio_id)
@@ -955,49 +1146,76 @@ def run_master_job(
     _EXECUTOR.submit(_run_master_worker, job, session_dir, entry, settings)
     log.info("Submitted job %s for %s", job_id, audio_id)
 
-    return _ok(JobSubmitResult(job_id=job_id, status="queued", audio_id=audio_id))
+    return _ok(
+        JobSubmitResponse,
+        JobSubmitResult(job_id=job_id, status="queued", audio_id=audio_id),
+    )
 
 
-# ============================================================================
-# TOOL: job_status
-# ============================================================================
-@mcp.tool()@mcp.tool(exclude_args=["ctx"], output_schema=JobStatusResponse.model_json_schema())
-def job_status(job_id: str, ctx: Optional[Context] = None) -> Dict[str, Any]:
+@mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False})
+def job_status(
+    job_id: Annotated[
+        str,
+        Field(
+            description="Job handle returned by run_master_job.",
+            pattern=r"^job_[a-f0-9]{12}$",
+        ),
+    ],
+    ctx: Context = None,
+) -> JobStatusResponse:
     """Check the current status of a mastering job."""
     if not _valid_handle(job_id, "job"):
-        return _err("invalid_job_id", "job_id format is invalid.", {"job_id": job_id})
+        return _err(
+            JobStatusResponse,
+            "invalid_job_id",
+            "job_id format is invalid.",
+            {"job_id": job_id},
+        )
 
     session_key, _ = _get_session_info(ctx)
     job = _get_job(job_id, session_key)
     if job is None:
-        return _err("not_found", "Unknown job_id.", {"job_id": job_id})
+        return _err(JobStatusResponse, "not_found", "Unknown job_id.", {"job_id": job_id})
 
     return _ok(
+        JobStatusResponse,
         JobStatusResult(
             job_id=job.job_id,
             status=job.status,
             progress=job.progress,
             elapsed_s=round(time.time() - job.created_at, 1),
-        )
+        ),
     )
 
 
-# ============================================================================
-# TOOL: job_result
-# ============================================================================
-@mcp.tool()@mcp.tool(exclude_args=["ctx"], output_schema=JobResultResponse.model_json_schema())
-def job_result(job_id: str, ctx: Optional[Context] = None) -> Dict[str, Any]:
+@mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False})
+def job_result(
+    job_id: Annotated[
+        str,
+        Field(
+            description="Job handle returned by run_master_job.",
+            pattern=r"^job_[a-f0-9]{12}$",
+        ),
+    ],
+    ctx: Context = None,
+) -> JobResultResponse:
     """Retrieve the final result of a completed mastering job."""
     if not _valid_handle(job_id, "job"):
-        return _err("invalid_job_id", "job_id format is invalid.", {"job_id": job_id})
+        return _err(
+            JobResultResponse,
+            "invalid_job_id",
+            "job_id format is invalid.",
+            {"job_id": job_id},
+        )
 
     session_key, _ = _get_session_info(ctx)
     job = _get_job(job_id, session_key)
     if job is None:
-        return _err("not_found", "Unknown job_id.", {"job_id": job_id})
+        return _err(JobResultResponse, "not_found", "Unknown job_id.", {"job_id": job_id})
 
     if job.status == "error":
         return _err(
+            JobResultResponse,
             "job_failed",
             "Job failed.",
             {"job_id": job_id, "error": job.error or "Unknown error"},
@@ -1005,6 +1223,7 @@ def job_result(job_id: str, ctx: Optional[Context] = None) -> Dict[str, Any]:
 
     if job.status != "done":
         return _err(
+            JobResultResponse,
             "job_not_complete",
             "Job is not yet complete. Call job_status to check progress.",
             {"job_id": job_id, "status": job.status},
@@ -1023,41 +1242,58 @@ def job_result(job_id: str, ctx: Optional[Context] = None) -> Dict[str, Any]:
     metrics = job.result or {}
 
     return _ok(
+        JobResultResponse,
         JobResultResult(
             job_id=job.job_id,
             status=job.status,
             artifacts=artifacts,
             metrics=metrics,
             precision=job.precision,
-        )
+        ),
     )
 
 
-# ============================================================================
-# TOOL: read_artifact
-# ============================================================================
-@mcp.tool()@mcp.tool(exclude_args=["ctx"], output_schema=ArtifactReadResponse.model_json_schema())
+@mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False})
 def read_artifact(
-    artifact_id: str,
-    offset: int = 0,
-    length: int = MAX_READ_BYTES,
-    ctx: Optional[Context] = None,
-) -> Dict[str, Any]:
+    artifact_id: Annotated[
+        str,
+        Field(
+            description="Artifact handle from upload_audio_to_session or job_result.",
+            pattern=r"^(aud|art)_[a-f0-9]{12}$",
+        ),
+    ],
+    offset: Annotated[
+        int,
+        Field(description="Byte offset for the chunk.", ge=0),
+    ] = 0,
+    length: Annotated[
+        int,
+        Field(
+            description="Bytes to read (max 2 MB).",
+            ge=1,
+            le=MAX_READ_BYTES,
+        ),
+    ] = MAX_READ_BYTES,
+    ctx: Context = None,
+) -> ArtifactReadResponse:
     """Read artifact bytes as base64 in bounded chunks."""
     if not _valid_handle(artifact_id):
         return _err(
+            ArtifactReadResponse,
             "invalid_artifact_id",
             "artifact_id format is invalid.",
             {"artifact_id": artifact_id},
         )
-    if offset < 0 or length < 0:
+    if offset < 0 or length <= 0:
         return _err(
+            ArtifactReadResponse,
             "invalid_range",
             "offset and length must be non-negative.",
             {"offset": offset, "length": length},
         )
     if length > MAX_READ_BYTES:
         return _err(
+            ArtifactReadResponse,
             "chunk_too_large",
             "Requested length exceeds server chunk limit.",
             {"max_bytes": MAX_READ_BYTES},
@@ -1066,14 +1302,25 @@ def read_artifact(
     session_key, session_dir = _get_session_info(ctx)
     entry = _load_artifact(session_key, session_dir, artifact_id)
     if entry is None:
-        return _err("not_found", "Artifact not found.", {"artifact_id": artifact_id})
+        return _err(
+            ArtifactReadResponse,
+            "not_found",
+            "Artifact not found.",
+            {"artifact_id": artifact_id},
+        )
 
     data_path = _artifact_data_path(session_dir, entry.data_filename)
     if not os.path.exists(data_path):
-        return _err("not_found", "Artifact file missing.", {"artifact_id": artifact_id})
+        return _err(
+            ArtifactReadResponse,
+            "not_found",
+            "Artifact file missing.",
+            {"artifact_id": artifact_id},
+        )
 
     if offset > entry.size_bytes:
         return _err(
+            ArtifactReadResponse,
             "offset_out_of_range",
             "Offset exceeds artifact size.",
             {"offset": offset, "size_bytes": entry.size_bytes},
@@ -1087,6 +1334,7 @@ def read_artifact(
     is_last = (offset + len(chunk)) >= entry.size_bytes
 
     return _ok(
+        ArtifactReadResponse,
         ArtifactReadResult(
             artifact_id=entry.artifact_id,
             filename=entry.filename,
@@ -1097,13 +1345,13 @@ def read_artifact(
             length=len(chunk),
             is_last=is_last,
             data_b64=b64,
-        )
+        ),
     )
 
 
-# ============================================================================
+# ===========================================================================
 # Entrypoint
-# ============================================================================
+# ===========================================================================
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
