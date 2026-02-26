@@ -2,10 +2,13 @@ from __future__ import annotations
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-
-
 """
-AuralMind Match — Maestro v7.3 "expert" (Expert-tier)
+
+IMPORTANT!!!: (
+    THIS IS TO BE USED WITH MCP FOR AURALMIND AS THE MAIN MASTERING ENGINE
+    THE MCP WILL CALL THIS SCRIPT AND PASS THE ARGUMENTS AND RUN IT AS A STANDALONE SCRIPT
+)
+
 ======================================================
 
 Goal
@@ -13,7 +16,7 @@ Goal
 Reference-based (or curve-based) mastering with *closed-loop* controls that protect
 "pre-loudness openness" at loud playback, while still achieving competitive loudness.
 
-What's new vs earlier generations
+WHAT IT DOES
 ---------------------------------
 1) Loudness Governor: Automatically backs off LUFS target if limiting would exceed a safe GR ceiling.
 2) Mono-Sub v2: Note-aware cutoff (derived from detected sub fundamental) + adaptive mono mix.
@@ -32,51 +35,46 @@ What's new vs earlier generations
    - Batched vectorized FFT magnitude analysis (fewer Python loops).
    - Cached DSP coefficients + LUFS baseline reuse inside governor search.
 
-Dependencies
-------------
-- numpy
-- scipy
-- soundfile
-
-No librosa / numba required. (This script stays lightweight and portable.)
-
 Usage
 -----
 Basic (curve-based master):
-    python auralmind_match_maestro_nextgen_v7_3_expert.py --target "song.wav" --out "song_master.wav"
+    python auralmind_maestro.py --target "song.wav" --out "song_master.wav"
 
 Reference match:
-    python auralmind_match_maestro_nextgen_v7_3_expert.py --reference "ref.mp3" --target "song.wav" --out "song_master.wav"
+    python auralmind_maestro.py --reference "ref.mp3" --target "song.wav" --out "song_master.wav"
 
 Choose a preset:
-    python auralmind_match_maestro_nextgen_v7_3_expert.py --preset hi_fi_streaming --target "song.wav" --out "song_master.wav"
+    python auralmind_maestro.py --preset hi_fi_streaming --target "song.wav" --out "song_master.wav"
 
 Notes
 -----
 - Default sample rate is 48000 Hz (streaming-friendly, modern production workflows).
 - True-peak limiting is approximated via oversampling peak detection + smooth gain.
-  For mission-critical mastering, a dedicated TP limiter is still recommended, but this is robust enough for real work.
+- DEMUCS IS ENABLED BY DEFAULT
+- AFTER LLM ANALYSIS, THE MCP WILL CALL THIS SCRIPT AND PASS THE ARGUMENTS AND RUN IT AS A STANDALONE SCRIPT
+
+
 """
 
 
-
+import os
 import argparse
 import json
 import logging
 import math
-import os
 import time
-from functools import lru_cache
-from typing import Optional, Tuple, Dict, Any, Union, Literal
-from pydantic import BaseModel, Field, ConfigDict
+import uuid
 import numpy as np
 import scipy
 import scipy.signal as sps
 import soundfile as sf
-from scipy.ndimage import maximum_filter1d
 from scipy.signal import fftconvolve
-import uuid
-# Optional Demucs (HT-Demucs stem separation) — enabled by default, with graceful fallback
+from functools import lru_cache
+from scipy.ndimage import maximum_filter1d
+from typing import Optional, Tuple, Dict, Any, Union, Literal
+from pydantic import BaseModel, Field, ConfigDict
+
+# Demucs (HT-Demucs stem separation) — enabled by default, LLM MAY DISABLE IT IF NOT NEEDED
 try:
     import torch  # type: ignore
     from demucs import pretrained  # type: ignore
@@ -1881,9 +1879,9 @@ def stem_pre_master_pass(stem: np.ndarray, sr: int, stem_name: str, preset: "Pre
 # ---------------------------
 class Preset(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
-
-    id: str = Field(default_factory=lambda: uuid.uuid4().hex)
+    id: str = Field(default_factory=lambda: uuid.uuid4())
     name: str = Field(default="AuralMind Settings")
+
     target_lufs: float = Field(default=-12.5, ge=-18.0, le=-9.0)
     ceiling_dbfs: float = Field(default=-1.0, ge=-10.0, le=0.0)
     sr: int = Field(default=48000, ge=8000, le=192000)

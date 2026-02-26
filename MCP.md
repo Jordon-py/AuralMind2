@@ -1,15 +1,11 @@
 # AuralMind Maestro MCP Usage
 
 This document provides quick examples for MCP resources, prompts, and tools.
-All tool calls return the standard envelope:
-
-```json
-{ "ok": true, "result": {}, "error": null }
-```
 
 ## Resources
 
 Available resources:
+
 - `config://system-prompt`
 - `config://mcp-docs`
 - `config://server-info`
@@ -28,6 +24,7 @@ Example read:
 Prompt name: `generate-mastering-strategy`
 
 Arguments:
+
 - `lufs` (float)
 - `crest` (float)
 - `platform` (`spotify` | `apple_music` | `youtube` | `soundcloud` | `club`)

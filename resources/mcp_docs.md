@@ -14,20 +14,6 @@ reuse the returned handles instead of filesystem paths.
 7) `job_result`
 8) `read_artifact` (audio/report download)
 
-## Tool Envelope
-
-All tools return:
-
-```json
-{ "ok": true, "result": {}, "error": null }
-```
-
-On failure:
-
-```json
-{ "ok": false, "result": null, "error": { "code": "...", "message": "...", "details": {} } }
-```
-
 ## Resources
 
 - `config://system-prompt` - cognitive mastering instructions (markdown).

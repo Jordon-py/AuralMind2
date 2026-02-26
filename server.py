@@ -59,9 +59,7 @@ BitDepth = Literal["float32", "float64"]
 # ---------------------------------------------------------------------------
 mcp = FastMCP(
     SERVER_NAME,
-    on_duplicate_tools="error",
-    on_duplicate_resources="error",
-    on_duplicate_prompts="error",
+    on_duplicate="error",
 )
 
 _http_middleware = [
@@ -120,23 +118,6 @@ class StrictBaseModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class ErrorInfo(StrictBaseModel):
-    code: str = Field(..., description="Machine-readable error code.")
-    message: str = Field(..., description="Human-readable error message.")
-    details: Optional[Dict[str, Any]] = Field(
-        default=None,
-        description="Optional structured error details.",
-    )
-
-
-class BaseEnvelope(StrictBaseModel):
-    ok: bool = Field(..., description="True when the tool call succeeded.")
-    error: Optional[ErrorInfo] = Field(
-        default=None,
-        description="Error details when ok=false.",
-    )
-
-
 class ArtifactRef(StrictBaseModel):
     artifact_id: str = Field(..., description="Artifact handle.")
     filename: str = Field(..., description="Stored filename.")
@@ -151,13 +132,6 @@ class UploadResult(StrictBaseModel):
     size_bytes: int = Field(..., description="Payload size in bytes.")
     sha256: str = Field(..., description="SHA-256 hash of the payload.")
     media_type: str = Field(..., description="Detected media type.")
-
-
-class UploadResponse(BaseEnvelope):
-    result: Optional[UploadResult] = Field(
-        default=None,
-        description="Upload payload metadata.",
-    )
 
 
 class AudioMetrics(StrictBaseModel):
@@ -181,10 +155,6 @@ class AnalyzeResult(StrictBaseModel):
     metrics: AudioMetrics = Field(..., description="Analysis metrics.")
 
 
-class AnalyzeResponse(BaseEnvelope):
-    result: Optional[AnalyzeResult] = Field(default=None, description="Analysis result.")
-
-
 class PresetSummary(StrictBaseModel):
     target_lufs: float = Field(..., description="Target LUFS for the preset.")
     ceiling_dbfs: float = Field(..., description="Limiter ceiling in dBFS.")
@@ -199,10 +169,6 @@ class PresetsResult(StrictBaseModel):
         ...,
         description="Preset map keyed by name.",
     )
-
-
-class PresetsResponse(BaseEnvelope):
-    result: Optional[PresetsResult] = Field(default=None, description="Preset list.")
 
 
 class MasterSettings(StrictBaseModel):
@@ -234,24 +200,10 @@ class SettingsResult(StrictBaseModel):
     )
 
 
-class SettingsResponse(BaseEnvelope):
-    result: Optional[SettingsResult] = Field(
-        default=None,
-        description="Settings preview.",
-    )
-
-
 class JobSubmitResult(StrictBaseModel):
     job_id: str = Field(..., description="Background job handle.")
     status: str = Field(..., description="Initial job status.")
     audio_id: str = Field(..., description="Audio handle submitted.")
-
-
-class JobSubmitResponse(BaseEnvelope):
-    result: Optional[JobSubmitResult] = Field(
-        default=None,
-        description="Job submission result.",
-    )
 
 
 class JobStatusResult(StrictBaseModel):
@@ -259,13 +211,6 @@ class JobStatusResult(StrictBaseModel):
     status: str = Field(..., description="Job status.")
     progress: str = Field(..., description="Human-readable progress message.")
     elapsed_s: float = Field(..., description="Seconds since job submission.")
-
-
-class JobStatusResponse(BaseEnvelope):
-    result: Optional[JobStatusResult] = Field(
-        default=None,
-        description="Job status payload.",
-    )
 
 
 class JobResultResult(StrictBaseModel):
@@ -282,13 +227,6 @@ class JobResultResult(StrictBaseModel):
     precision: str = Field(..., description="Export precision string.")
 
 
-class JobResultResponse(BaseEnvelope):
-    result: Optional[JobResultResult] = Field(
-        default=None,
-        description="Job output payload.",
-    )
-
-
 class ArtifactReadResult(StrictBaseModel):
     artifact_id: str = Field(..., description="Artifact handle.")
     filename: str = Field(..., description="Stored filename.")
@@ -301,36 +239,9 @@ class ArtifactReadResult(StrictBaseModel):
     data_b64: str = Field(..., description="Base64-encoded chunk bytes.")
 
 
-class ArtifactReadResponse(BaseEnvelope):
-    result: Optional[ArtifactReadResult] = Field(
-        default=None,
-        description="Artifact chunk payload.",
-    )
-
-
-ResponseT = TypeVar("ResponseT", bound=BaseEnvelope)
-
-
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-def _ok(response_model: type[ResponseT], result: BaseModel | Dict[str, Any]) -> ResponseT:
-    return response_model(ok=True, result=result, error=None)
-
-
-def _err(
-    response_model: type[ResponseT],
-    code: str,
-    message: str,
-    details: Optional[Dict[str, Any]] = None,
-) -> ResponseT:
-    return response_model(
-        ok=False,
-        result=None,
-        error=ErrorInfo(code=code, message=message, details=details),
-    )
-
-
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
@@ -537,14 +448,10 @@ def _build_settings(
     enable_harshness_limiter: bool,
     enable_air_motion: bool,
     bit_depth: str,
-) -> Tuple[Optional[MasterSettings], Optional[ErrorInfo]]:
+) -> MasterSettings:
     presets = maestro.get_presets()
     if preset_name not in presets:
-        return None, ErrorInfo(
-            code="invalid_preset",
-            message="Invalid preset.",
-            details={"available": list(presets.keys())},
-        )
+        raise ValueError(f"Invalid preset. Available: {list(presets.keys())}")
 
     warmth_val = max(0.0, min(1.0, float(warmth)))
     transient_val = max(0.0, min(4.0, float(transient_boost_db)))
@@ -562,7 +469,7 @@ def _build_settings(
         bit_depth=bit_depth_val,  # type: ignore[arg-type]
         subtype="FLOAT" if bit_depth_val == "float32" else "DOUBLE",
     )
-    return settings, None
+    return settings
 
 
 # ---------------------------------------------------------------------------
@@ -820,50 +727,25 @@ def upload_audio_to_session(
         ),
     ] = None,
     ctx: Context = None,
-) -> UploadResponse:
+) -> UploadResult:
     """Upload an audio file to the server before analysis or mastering."""
     if hex_payload and payload_b64:
-        return _err(
-            UploadResponse,
-            "ambiguous_payload",
-            "Provide only one payload encoding.",
-            {"allowed": ["hex_payload", "payload_b64"]},
-        )
+        raise ValueError("ambiguous_payload: Provide only one payload encoding (hex_payload or payload_b64).")
     if not hex_payload and not payload_b64:
-        return _err(
-            UploadResponse,
-            "missing_payload",
-            "Provide hex_payload or payload_b64.",
-            {"allowed": ["hex_payload", "payload_b64"]},
-        )
+        raise ValueError("missing_payload: Provide hex_payload or payload_b64.")
 
     try:
         if hex_payload:
             if len(hex_payload) > MAX_UPLOAD_HEX_CHARS:
-                return _err(
-                    UploadResponse,
-                    "payload_too_large",
-                    "Payload exceeds upload limit after decoding.",
-                    {"limit_bytes": MAX_UPLOAD_BYTES},
-                )
+                raise ValueError(f"payload_too_large: Payload exceeds upload limit {MAX_UPLOAD_BYTES} bytes after decoding.")
             payload = bytes.fromhex(hex_payload)
         else:
             payload = base64.b64decode(payload_b64 or "", validate=True)
     except (ValueError, binascii.Error) as exc:
-        return _err(
-            UploadResponse,
-            "invalid_payload",
-            "Payload decoding failed.",
-            {"error": str(exc)},
-        )
+        raise ValueError(f"invalid_payload: Payload decoding failed. Error: {exc}")
 
     if len(payload) > MAX_UPLOAD_BYTES:
-        return _err(
-            UploadResponse,
-            "payload_too_large",
-            "Payload exceeds upload limit after decoding.",
-            {"limit_bytes": MAX_UPLOAD_BYTES},
-        )
+        raise ValueError(f"payload_too_large: Payload exceeds upload limit {MAX_UPLOAD_BYTES} bytes after decoding.")
 
     session_key, session_dir = _get_session_info(ctx)
     audio_id = _new_id("aud")
@@ -882,23 +764,15 @@ def upload_audio_to_session(
         )
     except Exception as exc:
         log.exception("Upload failed for %s", filename)
-        return _err(
-            UploadResponse,
-            "upload_failed",
-            "Upload failed.",
-            {"error": str(exc)},
-        )
+        raise RuntimeError(f"upload_failed: Upload failed. Error: {exc}")
 
     log.info("Uploaded %s -> %s (%s bytes)", filename, audio_id, entry.size_bytes)
-    return _ok(
-        UploadResponse,
-        UploadResult(
-            audio_id=entry.artifact_id,
-            filename=entry.filename,
-            size_bytes=entry.size_bytes,
-            sha256=entry.sha256,
-            media_type=entry.media_type,
-        ),
+    return UploadResult(
+        audio_id=entry.artifact_id,
+        filename=entry.filename,
+        size_bytes=entry.size_bytes,
+        sha256=entry.sha256,
+        media_type=entry.media_type,
     )
 
 
@@ -912,33 +786,23 @@ def analyze_audio(
         ),
     ],
     ctx: Context = None,
-) -> AnalyzeResponse:
+) -> AnalyzeResult:
     """Comprehensive pre-mastering analysis - run BEFORE mastering."""
     if not _valid_handle(audio_id, "aud"):
-        return _err(
-            AnalyzeResponse,
-            "invalid_audio_id",
-            "audio_id format is invalid.",
-            {"audio_id": audio_id},
-        )
+        raise ValueError(f"invalid_audio_id: audio_id format is invalid: {audio_id}")
 
     session_key, session_dir = _get_session_info(ctx)
     entry = _load_artifact(session_key, session_dir, audio_id)
     if entry is None or entry.kind != "audio":
-        return _err(AnalyzeResponse, "not_found", "Audio not found.", {"audio_id": audio_id})
+        raise ValueError(f"not_found: Audio not found: {audio_id}")
 
     data_path = _artifact_data_path(session_dir, entry.data_filename)
     if not os.path.exists(data_path):
-        return _err(
-            AnalyzeResponse,
-            "not_found",
-            "Audio file missing.",
-            {"audio_id": audio_id},
-        )
+        raise ValueError(f"not_found: Audio file missing: {audio_id}")
 
     maestro, err = _get_maestro()
     if err is not None:
-        return _err(AnalyzeResponse, err["code"], err["message"], err.get("details"))
+        raise RuntimeError(f"{err['code']}: {err['message']} {err.get('details', '')}")
 
     try:
         y, sr = maestro.load_audio(data_path)
@@ -969,26 +833,19 @@ def analyze_audio(
             duration_s=round(len(y) / sr, 2),
         )
 
-        return _ok(
-            AnalyzeResponse,
-            AnalyzeResult(audio_id=audio_id, metrics=metrics),
-        )
+        return AnalyzeResult(audio_id=audio_id, metrics=metrics)
     except Exception as exc:
         log.exception("Analysis failed for %s", audio_id)
-        return _err(
-            AnalyzeResponse,
-            "analysis_failed",
-            "Analysis failed.",
-            {"error": str(exc)},
-        )
+        raise RuntimeError(f"analysis_failed: Analysis failed. Error: {exc}")
 
 
 @mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False})
-def list_presets() -> PresetsResponse:
+def list_presets() -> PresetsResult:
     """List all available mastering presets with key parameters."""
     maestro, err = _get_maestro()
     if err is not None:
-        return _err(PresetsResponse, err["code"], err["message"], err.get("details"))
+        raise RuntimeError(f"{err['code']}: {err['message']} {err.get('details', '')}")
+
 
     presets = maestro.get_presets()
     out: Dict[str, PresetSummary] = {}
@@ -1001,7 +858,7 @@ def list_presets() -> PresetsResponse:
             match_strength=float(p.match_strength),
             enable_harshness_limiter=bool(p.enable_harshness_limiter),
         )
-    return _ok(PresetsResponse, PresetsResult(presets=out))
+    return PresetsResult(presets=out)
 
 
 @mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False})
@@ -1034,13 +891,13 @@ def propose_master_settings(
         BitDepth,
         Field(description="Export bit depth."),
     ] = "float32",
-) -> SettingsResponse:
+) -> SettingsResult:
     """Validate and preview mastering settings before submitting a job."""
     maestro, err = _get_maestro()
     if err is not None:
-        return _err(SettingsResponse, err["code"], err["message"], err.get("details"))
+        raise RuntimeError(f"{err['code']}: {err['message']} {err.get('details', '')}")
 
-    settings, err_info = _build_settings(
+    settings = _build_settings(
         maestro,
         preset_name,
         target_lufs,
@@ -1050,9 +907,7 @@ def propose_master_settings(
         enable_air_motion,
         bit_depth,
     )
-    if err_info is not None:
-        return SettingsResponse(ok=False, result=None, error=err_info)
-    return _ok(SettingsResponse, SettingsResult(settings=settings))
+    return SettingsResult(settings=settings)
 
 
 @mcp.tool()
@@ -1093,40 +948,26 @@ def run_master_job(
         Field(description="Export bit depth."),
     ] = "float32",
     ctx: Context = None,
-) -> JobSubmitResponse:
+) -> JobSubmitResult:
     """Submit a mastering job to the background thread pool (non-blocking)."""
     if not _valid_handle(audio_id, "aud"):
-        return _err(
-            JobSubmitResponse,
-            "invalid_audio_id",
-            "audio_id format is invalid.",
-            {"audio_id": audio_id},
-        )
+        raise ValueError(f"invalid_audio_id: audio_id format is invalid: {audio_id}")
 
     session_key, session_dir = _get_session_info(ctx)
     entry = _load_artifact(session_key, session_dir, audio_id)
     if entry is None or entry.kind != "audio":
-        return _err(
-            JobSubmitResponse,
-            "not_found",
-            "Audio not found.",
-            {"audio_id": audio_id},
-        )
+        raise ValueError(f"not_found: Audio not found: {audio_id}")
 
     data_path = _artifact_data_path(session_dir, entry.data_filename)
     if not os.path.exists(data_path):
-        return _err(
-            JobSubmitResponse,
-            "not_found",
-            "Audio file missing.",
-            {"audio_id": audio_id},
-        )
+        raise ValueError(f"not_found: Audio file missing: {audio_id}")
 
     maestro, err = _get_maestro()
     if err is not None:
-        return _err(JobSubmitResponse, err["code"], err["message"], err.get("details"))
+        raise RuntimeError(f"{err['code']}: {err['message']} {err.get('details', '')}")
 
-    settings, err_info = _build_settings(
+
+    settings = _build_settings(
         maestro,
         preset_name,
         target_lufs,
@@ -1136,8 +977,6 @@ def run_master_job(
         enable_air_motion,
         bit_depth,
     )
-    if err_info is not None:
-        return JobSubmitResponse(ok=False, result=None, error=err_info)
 
     job_id = _new_id("job")
     job = JobState(job_id=job_id, session_key=session_key, audio_id=audio_id)
@@ -1146,10 +985,8 @@ def run_master_job(
     _EXECUTOR.submit(_run_master_worker, job, session_dir, entry, settings)
     log.info("Submitted job %s for %s", job_id, audio_id)
 
-    return _ok(
-        JobSubmitResponse,
-        JobSubmitResult(job_id=job_id, status="queued", audio_id=audio_id),
-    )
+    return JobSubmitResult(job_id=job_id, status="queued", audio_id=audio_id)
+
 
 
 @mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False})
@@ -1162,30 +999,23 @@ def job_status(
         ),
     ],
     ctx: Context = None,
-) -> JobStatusResponse:
+) -> JobStatusResult:
     """Check the current status of a mastering job."""
     if not _valid_handle(job_id, "job"):
-        return _err(
-            JobStatusResponse,
-            "invalid_job_id",
-            "job_id format is invalid.",
-            {"job_id": job_id},
-        )
+        raise ValueError(f"invalid_job_id: job_id format is invalid: {job_id}")
 
     session_key, _ = _get_session_info(ctx)
     job = _get_job(job_id, session_key)
     if job is None:
-        return _err(JobStatusResponse, "not_found", "Unknown job_id.", {"job_id": job_id})
+        raise ValueError(f"not_found: Unknown job_id: {job_id}")
 
-    return _ok(
-        JobStatusResponse,
-        JobStatusResult(
-            job_id=job.job_id,
-            status=job.status,
-            progress=job.progress,
-            elapsed_s=round(time.time() - job.created_at, 1),
-        ),
+    return JobStatusResult(
+        job_id=job.job_id,
+        status=job.status,
+        progress=job.progress,
+        elapsed_s=round(time.time() - job.created_at, 1),
     )
+
 
 
 @mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False})
@@ -1198,36 +1028,22 @@ def job_result(
         ),
     ],
     ctx: Context = None,
-) -> JobResultResponse:
+) -> JobResultResult:
     """Retrieve the final result of a completed mastering job."""
     if not _valid_handle(job_id, "job"):
-        return _err(
-            JobResultResponse,
-            "invalid_job_id",
-            "job_id format is invalid.",
-            {"job_id": job_id},
-        )
+        raise ValueError(f"invalid_job_id: job_id format is invalid: {job_id}")
 
     session_key, _ = _get_session_info(ctx)
     job = _get_job(job_id, session_key)
     if job is None:
-        return _err(JobResultResponse, "not_found", "Unknown job_id.", {"job_id": job_id})
+        raise ValueError(f"not_found: Unknown job_id: {job_id}")
 
     if job.status == "error":
-        return _err(
-            JobResultResponse,
-            "job_failed",
-            "Job failed.",
-            {"job_id": job_id, "error": job.error or "Unknown error"},
-        )
+        raise RuntimeError(f"job_failed: Job failed with error: {job.error or 'Unknown error'}")
 
     if job.status != "done":
-        return _err(
-            JobResultResponse,
-            "job_not_complete",
-            "Job is not yet complete. Call job_status to check progress.",
-            {"job_id": job_id, "status": job.status},
-        )
+        raise RuntimeError(f"job_not_complete: Job is not yet complete. Call job_status to check progress. Current status: {job.status}")
+
 
     artifacts = [
         ArtifactRef(
@@ -1241,16 +1057,14 @@ def job_result(
     ]
     metrics = job.result or {}
 
-    return _ok(
-        JobResultResponse,
-        JobResultResult(
-            job_id=job.job_id,
-            status=job.status,
-            artifacts=artifacts,
-            metrics=metrics,
-            precision=job.precision,
-        ),
+    return JobResultResult(
+        job_id=job.job_id,
+        status=job.status,
+        artifacts=artifacts,
+        metrics=metrics,
+        precision=job.precision,
     )
+
 
 
 @mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False})
@@ -1275,56 +1089,27 @@ def read_artifact(
         ),
     ] = MAX_READ_BYTES,
     ctx: Context = None,
-) -> ArtifactReadResponse:
+) -> ArtifactReadResult:
     """Read artifact bytes as base64 in bounded chunks."""
     if not _valid_handle(artifact_id):
-        return _err(
-            ArtifactReadResponse,
-            "invalid_artifact_id",
-            "artifact_id format is invalid.",
-            {"artifact_id": artifact_id},
-        )
+        raise ValueError(f"invalid_artifact_id: artifact_id format is invalid: {artifact_id}")
     if offset < 0 or length <= 0:
-        return _err(
-            ArtifactReadResponse,
-            "invalid_range",
-            "offset and length must be non-negative.",
-            {"offset": offset, "length": length},
-        )
+        raise ValueError(f"invalid_range: offset and length must be non-negative. offset={offset}, length={length}")
     if length > MAX_READ_BYTES:
-        return _err(
-            ArtifactReadResponse,
-            "chunk_too_large",
-            "Requested length exceeds server chunk limit.",
-            {"max_bytes": MAX_READ_BYTES},
-        )
+        raise ValueError(f"chunk_too_large: Requested length exceeds server chunk limit {MAX_READ_BYTES}")
 
     session_key, session_dir = _get_session_info(ctx)
     entry = _load_artifact(session_key, session_dir, artifact_id)
     if entry is None:
-        return _err(
-            ArtifactReadResponse,
-            "not_found",
-            "Artifact not found.",
-            {"artifact_id": artifact_id},
-        )
+        raise ValueError(f"not_found: Artifact not found: {artifact_id}")
 
     data_path = _artifact_data_path(session_dir, entry.data_filename)
     if not os.path.exists(data_path):
-        return _err(
-            ArtifactReadResponse,
-            "not_found",
-            "Artifact file missing.",
-            {"artifact_id": artifact_id},
-        )
+        raise ValueError(f"not_found: Artifact file missing: {artifact_id}")
 
     if offset > entry.size_bytes:
-        return _err(
-            ArtifactReadResponse,
-            "offset_out_of_range",
-            "Offset exceeds artifact size.",
-            {"offset": offset, "size_bytes": entry.size_bytes},
-        )
+        raise ValueError(f"offset_out_of_range: Offset exceeds artifact size. offset={offset}, size={entry.size_bytes}")
+
 
     with open(data_path, "rb") as f:
         f.seek(offset)
@@ -1333,20 +1118,18 @@ def read_artifact(
     b64 = base64.b64encode(chunk).decode("ascii")
     is_last = (offset + len(chunk)) >= entry.size_bytes
 
-    return _ok(
-        ArtifactReadResponse,
-        ArtifactReadResult(
-            artifact_id=entry.artifact_id,
-            filename=entry.filename,
-            media_type=entry.media_type,
-            size_bytes=entry.size_bytes,
-            sha256=entry.sha256,
-            offset=offset,
-            length=len(chunk),
-            is_last=is_last,
-            data_b64=b64,
-        ),
+    return ArtifactReadResult(
+        artifact_id=entry.artifact_id,
+        filename=entry.filename,
+        media_type=entry.media_type,
+        size_bytes=entry.size_bytes,
+        sha256=entry.sha256,
+        offset=offset,
+        length=len(chunk),
+        is_last=is_last,
+        data_b64=b64,
     )
+
 
 
 # ===========================================================================

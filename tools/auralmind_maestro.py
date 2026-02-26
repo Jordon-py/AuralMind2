@@ -2084,7 +2084,7 @@ class Preset:
     bit_depth: str = "float32"  # Options: "float32", "float64"
     target_lufs: float = -12.3
     ceiling_dbfs: float = -1.0
-    
+
 
     fir_taps: int = 4097
     match_strength: float = 0.42
@@ -2477,7 +2477,7 @@ def master(target_path: str, out_path: str, preset: Preset,
 
     y_t, sr_t = load_audio(target_path)
     y_t = ensure_stereo(y_t)
-    
+
     # --- PRISTINE RESAMPLING ENFORCEMENT ---
     # We guarantee 48kHz for optimal anti-aliasing in softclip/saturation stages.
     if sr_t != 48000:
@@ -2689,7 +2689,7 @@ def master(target_path: str, out_path: str, preset: Preset,
         return y_lim, lim_stats
 
     # GEA: Governor Excerpt Analysis
-    # We find the loudest 45s of the track to perform the search; 
+    # We find the loudest 45s of the track to perform the search;
     # this makes iterations 10x faster on a typical 5min song.
     log.info("[master] identifying loudest sector for governor search...")
     y_excerpt = find_loudest_excerpt(y, sr_t, duration=45.0)
@@ -3020,7 +3020,7 @@ def main():
     if args.no_microdetail:
         updates["enable_microdetail"] = False
 
-    if args.transient_boost is not None:    
+    if args.transient_boost is not None:
         updates["transient_sculpt_boost_db"] = float(args.transient_boost)
     if args.transient_mix is not None:
         updates["transient_sculpt_mix"] = float(args.transient_mix)
