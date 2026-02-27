@@ -1,5 +1,0 @@
-# Enable Codex's experimental RMCP client for HTTP MCP servers
-experimental_use_rmcp_client = true
-
-[mcp_servers.Auralmind2]
-url = "http://127.0.0.1:8080/mcp"
