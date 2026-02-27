@@ -1,0 +1,21 @@
+# Exported from Render on 2026-02-27T13:56:26Z
+version: "1"
+projects:
+- name: My project
+  environments:
+  - name: Production
+    services:
+    - type: web
+      name: AuralMind2
+      runtime: python
+      repo: https://github.com/Jordon-py/AuralMind2
+      plan: free
+      envVars:
+      - key: PORT
+        sync: false
+      region: oregon
+      buildCommand: pip install -r requirements.txt
+      startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
+      autoDeployTrigger: commit
+      previews:
+        generation: automatic
