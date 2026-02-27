@@ -1,3 +1,4 @@
+from __future__ import annotations
 
 """
 AuralMind Maestro - FastMCP Server
@@ -31,19 +32,21 @@ Architecture
                           -> safe_write_text           (sync,  allowlist write)
 """
 
-from __future__ import annotations
 
-import base64
-import binascii
-import hashlib
-import json
-import logging
+
 import os
 import re
-import tempfile
-import threading
+import json
 import time
 import uuid
+import base64
+import asyncio
+import binascii
+import hashlib
+import logging
+import tempfile
+import threading
+from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Tuple, Literal, Annotated, Callable
@@ -54,6 +57,7 @@ from pydantic import BaseModel, Field, ConfigDict, model_validator
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 
+load_dotenv(".env")
 
 log = logging.getLogger("auralmind.server")
 
