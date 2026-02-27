@@ -15,9 +15,11 @@ mastering workflow for LLM clients.
 ## Architecture
 
 ```
-LLM client -> FastMCP (stdio)
+LLM client -> FastMCP (stdio / http)
    resources: config://system-prompt, config://mcp-docs, config://server-info
-   prompts:   generate-mastering-strategy
+              auralmind://workflow, auralmind://metrics, auralmind://presets
+              auralmind://contracts
+   prompts:   generate-mastering-strategy, master_once, master_closed_loop_prompt
    tools:     upload_audio_to_session
               analyze_audio
               list_presets
@@ -25,8 +27,12 @@ LLM client -> FastMCP (stdio)
               run_master_job
               job_status
               job_result
+              master_audio
+              master_closed_loop
               read_artifact
-   DSP engine: auralmind_match_maestro_v7_3.py
+              safe_read_text
+              safe_write_text
+   DSP engine: tools/auralmind_maestro.py
 ```
 
 ## Requirements
@@ -60,10 +66,56 @@ Or with uv:
 uv run server.py
 ```
 
-The server writes session files into `./maestro_sessions/<session_hash>` and returns
-stable handles instead of filesystem paths.
+The server writes session files into `MAESTRO_SESSION_DIR` (default: OS temp
+`maestro_sessions/`) and returns stable handles instead of filesystem paths.
 
 For request/response examples, see `MCP.md`.
+
+## MCP primitives (tools, resources, prompts)
+
+Resources are read-only data (docs, presets, limits). Use them to load guidance
+or static metadata.
+
+```json
+{
+  "method": "resources/read",
+  "params": { "uri": "auralmind://workflow" }
+}
+```
+
+Prompts are reusable templates. Use them to generate a consistent mastering
+strategy from metrics.
+
+```json
+{
+  "method": "prompts/render",
+  "params": {
+    "name": "generate-mastering-strategy",
+    "arguments": {
+      "integrated_lufs": -13.1,
+      "crest_db": 9.2,
+      "platform": "spotify"
+    }
+  }
+}
+```
+
+Tools are executable actions. Use them to upload, analyze, master, and download
+artifacts.
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "run_master_job",
+    "arguments": {
+      "audio_id": "aud_1234567890ab",
+      "preset_name": "hi_fi_streaming",
+      "target_lufs": -12.5
+    }
+  }
+}
+```
 
 ## MCP resources and prompts
 
@@ -79,29 +131,33 @@ Returns the LLM-facing MCP usage guide from `resources/mcp_docs.md`.
 
 Returns server limits and supported bit depth as JSON.
 
+### Resource: `auralmind://workflow`
+
+Returns the ordered mastering flow (JSON).
+
+### Resource: `auralmind://metrics`
+
+Returns scoring thresholds (JSON).
+
+### Resource: `auralmind://presets`
+
+Returns detailed preset metadata (JSON).
+
+### Resource: `auralmind://contracts`
+
+Returns tool I/O contracts (JSON schema summary).
+
 ### Prompt: `generate-mastering-strategy`
 
 Signature:
 
 ```
-generate-mastering-strategy(lufs: float, crest: float, platform: str)
+generate-mastering-strategy(integrated_lufs: float, crest_db: float, platform: str)
 ```
 
 Returns a prompt that embeds the system prompt plus the provided metrics.
 
 ## Tools
-
-All tools return a consistent envelope:
-
-```json
-{
-  "ok": true,
-  "result": {},
-  "error": null
-}
-```
-
-On failure, `ok=false` and `error` includes `code`, `message`, and optional `details`.
 
 ### `upload_audio_to_session`
 
@@ -115,7 +171,7 @@ Parameters:
 
 Notes:
 
-- The max payload is 400 MB after decode.
+- Max payload is 400 MB after decode.
 
 ### `analyze_audio`
 
@@ -123,14 +179,12 @@ Run pre-mastering analysis on the uploaded file.
 
 Parameters:
 
-- `audio_id` (str): from `upload_audio_to_session`.
+- `audio_id` (str): from `upload_audio_to_session` or a mastered `art_` handle.
 
 Returns:
 
-- `lufs_i`, `tp_dbfs`, `peak_dbfs`, `rms_dbfs`, `crest_db`
-- `corr_broadband`, `corr_low`, `sub_mono_ok`, `centroid_hz`
-- `recommended_preset`, `recommended_lufs`
-- `sample_rate`, `duration_s`
+- `integrated_lufs`, `true_peak_dbtp`, `crest_db`, `stereo_correlation`
+- `duration_s`, `peak_dbfs`, `rms_dbfs`, `centroid_hz`
 
 ### `list_presets`
 
@@ -167,7 +221,7 @@ Parameters:
 
 Poll for job progress.
 
-Returns `status`, `progress`, and elapsed time.
+Returns `job_id`, `status`, `progress`, `elapsed_s`, and optional `error`.
 
 ### `job_result`
 
@@ -176,8 +230,16 @@ Fetch output once the job is `done`.
 Returns:
 
 - `artifacts` (list of `{artifact_id, filename, media_type, size_bytes, sha256}`)
+- `metrics` (final analysis metrics)
 - `precision` (format string)
-- Final loudness and true-peak metrics
+
+### `master_audio`
+
+Run a synchronous mastering pass (same inputs as `run_master_job`).
+
+### `master_closed_loop`
+
+Run a deterministic 2-pass auto master for a goal/platform.
 
 ### `read_artifact`
 
@@ -193,6 +255,10 @@ Returns:
 
 - `data_b64` plus artifact metadata (`filename`, `media_type`, `size_bytes`, `sha256`)
 - `offset`, `length`, `is_last`
+
+### `safe_read_text` / `safe_write_text`
+
+Read/write text files inside the server allowlist (session storage and `data/`).
 
 ## DSP pipeline (tools/auralmind_maestro.py)
 

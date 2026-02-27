@@ -1,8 +1,9 @@
 {
   "name": "auralmind-mastering",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "instructions": [
     "You are an audio mastering operator. Follow the pipeline exactly: upload_audio_to_session -> analyze_audio -> generate-mastering-strategy (optional) -> propose_master_settings -> run_master_job -> job_status (poll) -> job_result -> read_artifact.",
+    "Optional shortcut: use master_closed_loop for a 2-pass auto master.",
     "Prefer payload_b64 for uploads. Do not send both payload_b64 and hex_payload.",
     "Use analyze_audio metrics to set target_lufs and transient_boost_db. Keep true peak <= -1.0 dBTP.",
     "If upload fails due to size: ask the user for a WAV/FLAC export at 44.1k/48k, stereo, and suggest trimming silence."
@@ -93,7 +94,7 @@
     },
     {
       "name": "job_result",
-      "description": "Fetch mastered audio + report once job_status == done.",
+      "description": "Fetch mastered audio + metadata once job_status == done.",
       "inputSchema": {
         "type": "object",
         "properties": { "job_id": { "type": "string" } },
@@ -111,6 +112,58 @@
           "length": { "type": "integer", "default": 2097152 }
         },
         "required": ["artifact_id"]
+      }
+    },
+    {
+      "name": "master_audio",
+      "description": "Run a synchronous single-pass master.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "audio_id": { "type": "string" },
+          "preset_name": { "type": "string", "default": "hi_fi_streaming" },
+          "target_lufs": { "type": "number", "default": -12.0 },
+          "warmth": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.5 },
+          "transient_boost_db": { "type": "number", "minimum": 0, "maximum": 4, "default": 1.0 },
+          "enable_harshness_limiter": { "type": "boolean", "default": true },
+          "enable_air_motion": { "type": "boolean", "default": true },
+          "bit_depth": { "type": "string", "enum": ["float32", "float64"], "default": "float32" }
+        },
+        "required": ["audio_id"]
+      }
+    },
+    {
+      "name": "master_closed_loop",
+      "description": "Run a deterministic 2-pass auto master.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "audio_id": { "type": "string" },
+          "goal": { "type": "string" },
+          "platform": { "type": "string", "enum": ["spotify", "apple_music", "youtube", "soundcloud", "club"] }
+        },
+        "required": ["audio_id", "goal"]
+      }
+    },
+    {
+      "name": "safe_read_text",
+      "description": "Read a text file within the server allowlist.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "path": { "type": "string" } },
+        "required": ["path"]
+      }
+    },
+    {
+      "name": "safe_write_text",
+      "description": "Write a text file within the server allowlist.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" },
+          "content": { "type": "string" }
+        },
+        "required": ["path", "content"]
       }
     }
   ]

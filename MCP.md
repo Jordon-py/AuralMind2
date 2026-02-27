@@ -9,6 +9,10 @@ Available resources:
 - `config://system-prompt`
 - `config://mcp-docs`
 - `config://server-info`
+- `auralmind://workflow`
+- `auralmind://metrics`
+- `auralmind://presets`
+- `auralmind://contracts`
 
 Example read:
 
@@ -25,8 +29,8 @@ Prompt name: `generate-mastering-strategy`
 
 Arguments:
 
-- `lufs` (float)
-- `crest` (float)
+- `integrated_lufs` (float)
+- `crest_db` (float)
 - `platform` (`spotify` | `apple_music` | `youtube` | `soundcloud` | `club`)
 
 Example render:
@@ -37,8 +41,8 @@ Example render:
   "params": {
     "name": "generate-mastering-strategy",
     "arguments": {
-      "lufs": "-13.2",
-      "crest": "9.4",
+      "integrated_lufs": -13.2,
+      "crest_db": 9.4,
       "platform": "spotify"
     }
   }
@@ -159,6 +163,70 @@ Example render:
       "artifact_id": "art_1a2b3c4d5e6f",
       "offset": 0,
       "length": 2097152
+    }
+  }
+}
+```
+
+### master_audio (sync)
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "master_audio",
+    "arguments": {
+      "audio_id": "aud_1a2b3c4d5e6f",
+      "preset_name": "hi_fi_streaming",
+      "target_lufs": -12.0,
+      "warmth": 0.45,
+      "transient_boost_db": 1.2,
+      "enable_harshness_limiter": true,
+      "enable_air_motion": true,
+      "bit_depth": "float32"
+    }
+  }
+}
+```
+
+### master_closed_loop
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "master_closed_loop",
+    "arguments": {
+      "audio_id": "aud_1a2b3c4d5e6f",
+      "goal": "Loud & Punchy",
+      "platform": "spotify"
+    }
+  }
+}
+```
+
+### safe_read_text
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "safe_read_text",
+    "arguments": { "path": "./data/notes.txt" }
+  }
+}
+```
+
+### safe_write_text
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "safe_write_text",
+    "arguments": {
+      "path": "./data/notes.txt",
+      "content": "Mastering notes"
     }
   }
 }

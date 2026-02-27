@@ -1,7 +1,7 @@
 # AuralMind Maestro MCP - LLM Guide
 
 This server exposes a non-blocking mastering workflow. Use the tools in order and
-reuse the returned handles instead of filesystem paths.
+reuse returned handles instead of filesystem paths.
 
 ## Quick Flow (Recommended)
 
@@ -12,21 +12,27 @@ reuse the returned handles instead of filesystem paths.
 5) `run_master_job`
 6) Poll `job_status`
 7) `job_result`
-8) `read_artifact` (audio/report download)
+8) `read_artifact` (audio/JSON download)
+
+Optional: `master_closed_loop` for a 2-pass auto master.
 
 ## Resources
 
 - `config://system-prompt` - cognitive mastering instructions (markdown).
 - `config://mcp-docs` - this document (markdown).
 - `config://server-info` - server limits and supported bit depth (JSON).
+- `auralmind://workflow` - ordered mastering workflow (JSON).
+- `auralmind://metrics` - scoring thresholds (JSON).
+- `auralmind://presets` - preset atlas (JSON).
+- `auralmind://contracts` - tool I/O contracts (JSON).
 
 ## Prompt
 
-`generate-mastering-strategy(lufs, crest, platform)`
+`generate-mastering-strategy(integrated_lufs, crest_db, platform)`
 
 Parameters:
-    - `lufs` (float): integrated loudness (LUFS)
-    - `crest` (float): crest factor (dB)
+    - `integrated_lufs` (float): integrated loudness (LUFS)
+    - `crest_db` (float): crest factor (dB)
     - `platform` (spotify | apple_music | youtube | soundcloud | club)
 
 Returns a prompt that embeds the system prompt plus the provided metrics.
@@ -49,21 +55,19 @@ Returns:
 ### analyze_audio
 
 Parameters:
-    - `audio_id` (aud_...)
+    - `audio_id` (aud_... or art_...)
 
 Returns metrics:
 
-- `lufs_i`, `tp_dbfs`, `peak_dbfs`, `rms_dbfs`, `crest_db`
-- `corr_broadband`, `corr_low`, `sub_mono_ok`
-- `centroid_hz`, `recommended_preset`, `recommended_lufs`
-- `sample_rate`, `duration_s`
+- `integrated_lufs`, `true_peak_dbtp`, `crest_db`, `stereo_correlation`, `duration_s`
+- `peak_dbfs`, `rms_dbfs`, `centroid_hz`
 
 ### list_presets
 
 Returns a `presets` map of preset names to key tuning values:
 
 - `target_lufs`, `ceiling_dbfs`, `limiter_mode`, `governor_gr_limit_db`
-- `match_strength`, `enable_harshness_limiter`
+- `match_strength`, `enable_harshness_limiter`, `enable_air_motion`, `bit_depth`
 
 ### propose_master_settings
 
@@ -79,7 +83,7 @@ Parameters:
     - `bit_depth` (`float32` | `float64`)
 
 Returns:
-    - `settings` (safe, clamped values including `subtype`)
+    - `settings` (safe, clamped values)
 
 ### run_master_job
 
@@ -95,7 +99,7 @@ Parameters:
     - `job_id`
 
 Returns:
-    - `status`, `progress`, `elapsed_s`
+    - `job_id`, `status`, `progress`, `elapsed_s`, `error` (optional)
 
 ### job_result
 
@@ -103,9 +107,24 @@ Parameters:
     - `job_id`
 
 Returns:
-    - `artifacts` (audio + report)
-    - `metrics` (final loudness + governor stats)
+    - `job_id`, `status`
+    - `artifacts` (audio + JSON summaries)
+    - `metrics` (final loudness and analysis metrics)
     - `precision`
+
+### master_audio
+
+Runs a synchronous, single-pass master (same inputs as `run_master_job`).
+
+Returns:
+    - `master_wav_id`, `metrics_before`, `metrics_after`, `tuning_trace_id`, `artifacts`
+
+### master_closed_loop
+
+Runs a 2-pass auto master for a goal/platform. Uses the original input for each pass.
+
+Returns:
+    - `best_run_id`, `artifacts`, `runner_summary_id`, `metrics_final`
 
 ### read_artifact
 
@@ -117,6 +136,10 @@ Parameters:
 Returns:
     - `data_b64` plus artifact metadata (`filename`, `media_type`, `size_bytes`, `sha256`)
     - `offset`, `length`, `is_last`
+
+### safe_read_text / safe_write_text
+
+Read/write text files within the server allowlist (session storage and `data/`).
 
 ## Strategy-to-Settings Mapping
 
