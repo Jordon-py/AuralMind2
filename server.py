@@ -251,10 +251,47 @@ class FileWriteOut(StrictBaseModel):
     path: str
 
 
+class UploadIn(StrictBaseModel):
+    filename: str = Field(..., description="Original filename.")
+    payload_b64: Optional[str] = Field(None, description="B64 payload.")
+
+
+class UploadResult(StrictBaseModel):
+    audio_id: str = Field(..., description="Server-side handle for the uploaded audio.")
+    filename: str = Field(..., description="Sanitized filename stored on the server.")
+    size_bytes: int = Field(..., description="Payload size in bytes.")
+    sha256: str = Field(..., description="SHA-256 hash of the payload.")
+    media_type: str = Field(..., description="Detected media type.")
+
+
+class ArtifactReadResult(StrictBaseModel):
+    artifact_id: str = Field(..., description="Artifact handle.")
+    filename: str = Field(..., description="Stored filename.")
+    media_type: str = Field(..., description="MIME type.")
+    size_bytes: int = Field(..., description="Artifact size in bytes.")
+    sha256: str = Field(..., description="SHA-256 hash of the artifact.")
+    offset: int = Field(..., description="Byte offset for this chunk.")
+    length: int = Field(..., description="Length of this chunk in bytes.")
+    is_last: bool = Field(..., description="True if this is the final chunk.")
+    data_b64: str = Field(..., description="Base64-encoded chunk bytes.")
+
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+@dataclass
+class ArtifactEntry:
+    artifact_id: str
+    kind: str
+    filename: str
+    media_type: str
+    size_bytes: int
+    sha256: str
+    data_filename: str
+    created_at: float = field(default_factory=time.time)
+
+
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
