@@ -1991,7 +1991,7 @@ def get_presets() -> Dict[str, Preset]:
             deess_mix=0.48,
             glow_drive_db=0.8,
             glow_mix=0.48,
-            mono_sub_base_mix=0.50,
+            mono_sub_base_mix=0.56,
             width_mid=1.04,
             width_hi=1.24,
             microshift_ms=0.18,
@@ -2000,8 +2000,8 @@ def get_presets() -> Dict[str, Preset]:
             limiter_attack_ms=1.2,
             limiter_release_ms=70.0,
             limiter_stereo_link=0.95,
-            softclip_drive_db=0.9,
-            softclip_mix=0.18,
+            softclip_drive_db=1.5,
+            softclip_mix=0.23,
             microdetail_amount=0.18,
             microdetail_threshold_db=-35.0,
             microdetail_max_boost_db=3.0,
@@ -2041,7 +2041,7 @@ def get_presets() -> Dict[str, Preset]:
         ),
         "cinematic": Preset(
             name="cinematic",
-            target_lufs=-14.5,
+            target_lufs=-13.5,
             match_strength=0.58,
             hi_factor=0.68,
             max_eq_db=4.8,
@@ -2060,15 +2060,16 @@ def get_presets() -> Dict[str, Preset]:
             limiter_attack_ms=1.4,
             limiter_release_ms=90.0,
             softclip_drive_db=0.6,
-            softclip_mix=0.12,
+            softclip_mix=0.16,
             microdetail_amount=0.16,
             microdetail_threshold_db=-36.0,
             microdetail_max_boost_db=2.5,
             microdetail_mix=0.50,
             transient_sculpt_boost_db=1.6,
             transient_sculpt_mix=0.26,
-            hooklift_mix=0.14,
-            governor_gr_limit_db=-0.8,
+            hooklift_mix=0.18,
+            governor_gr_limit_db=-1.8,
+            movement_amount=0.20,
             enable_stem_separation=False,
         ),
         "club": Preset(
@@ -2608,7 +2609,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--target", required=True, help="Path to target audio (wav/flac/aiff/ogg).")
     p.add_argument("--reference", default=None, help="Optional reference audio for match EQ.")
     p.add_argument("--out", required=True, help="Output mastered wav path.")
-    p.add_argument("--out-subtype", default=None,
+    p.add_argument("--out-subtype", default="DOUBLE",
                    help="Optional libsndfile subtype (e.g., PCM_24, PCM_16, FLOAT). "
                         "Default: WAV -> PCM_24, otherwise libsndfile default.")
     p.add_argument("--no-dither", action="store_true",
@@ -2627,7 +2628,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--demucs-shifts", type=int, default=None, help="Demucs shifts (quality vs speed).")
 
     p.add_argument("--no-movement", action="store_true", help="Disable movement automation (otherwise enabled by preset).")
-    p.add_argument("--movement-amount", type=float, default=0.11, help="Movement amount (0.0-0.35).")
+    p.add_argument("--movement-amount", type=float, default=0.20, help="Movement amount (0.0-0.35).")
 
     p.add_argument("--no-hooklift", action="store_true", help="Disable HookLift (otherwise enabled by preset).")
     p.add_argument("--hooklift-mix", type=float, default=None, help="HookLift wet mix (0.0-0.65).")
