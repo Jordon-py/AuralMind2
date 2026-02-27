@@ -312,7 +312,6 @@ AuralMind/
     mcp_docs.md
   MCP.md
   requirements.txt
-  pyproject.toml
   README.md
 ```
 
