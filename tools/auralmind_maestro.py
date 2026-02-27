@@ -427,6 +427,17 @@ def apply_lufs_gain(
     return (y * g).astype(np.float32), cur, gain_db
 
 
+def _dynamic_governor_gr_limit(base_limit_db: float, required_gain_db: float) -> float:
+    """
+    Loosen GR ceiling when the target requires more gain, so LUFS targets remain reachable.
+    """
+    if required_gain_db <= 2.0:
+        return float(base_limit_db)
+    extra = (required_gain_db - 2.0) * 0.6
+    extra = min(extra, 2.8)
+    return float(max(base_limit_db - extra, -5.0))
+
+
 # ---------------------------
 # True-peak limiting (approx)
 # ---------------------------
@@ -699,6 +710,8 @@ def peak_control_chain(
     y: np.ndarray,
     sr: int,
     preset: "Preset",
+    *,
+    loudness_gain_db: Optional[float] = None,
 ) -> Tuple[np.ndarray, Dict[str, float]]:
     """
     Final peak control chain:
@@ -727,11 +740,18 @@ def peak_control_chain(
         base_mix = float(getattr(preset, "softclip_mix", 0.25))
         adaptive_scale = float(np.interp(crest_db, [7.5, 16.0], [1.06, 0.72]))
         softclip_mix_effective = float(clamp(base_mix * adaptive_scale, 0.0, 0.60))
+        if loudness_gain_db is not None:
+            mix_boost = float(clamp((float(loudness_gain_db) - 2.5) * 0.08, 0.0, 0.08))
+            softclip_mix_effective = float(clamp(softclip_mix_effective + mix_boost, 0.0, 0.60))
+        drive_db = float(getattr(preset, "softclip_drive_db", 1.2))
+        if loudness_gain_db is not None:
+            drive_boost = float(clamp((float(loudness_gain_db) - 2.0) * 0.35, -0.4, 1.2))
+            drive_db = float(max(0.0, drive_db + drive_boost))
         y = softclip_oversampled(
             y, sr,
             pre_db_below_ceiling=float(getattr(preset, "softclip_pre_db_below_ceiling", 0.6)),
             ceiling_dbfs=float(preset.ceiling_dbfs),
-            drive_db=float(getattr(preset, "softclip_drive_db", 1.2)),
+            drive_db=drive_db,
             mix=softclip_mix_effective,
             oversample=int(preset.limiter_oversample),
         )
@@ -2677,7 +2697,7 @@ def master(target_path: str, out_path: str, preset: Preset,
 
     def _render_at(audio: np.ndarray, target_lufs: float, pre_measured: Optional[float] = None) -> Tuple[np.ndarray, Dict[str, float]]:
         y_norm, cur_lufs, gain_db = apply_lufs_gain(audio, sr_t, target_lufs, cur_lufs=pre_measured)
-        y_lim, lim_stats = peak_control_chain(y_norm, sr_t, preset)
+        y_lim, lim_stats = peak_control_chain(y_norm, sr_t, preset, loudness_gain_db=gain_db)
         post = integrated_loudness_lufs(y_lim, sr_t)
         lim_stats = {
             **lim_stats,
@@ -2723,8 +2743,11 @@ def master(target_path: str, out_path: str, preset: Preset,
         post = float(cand_stats.get("post_lufs", -100.0))
         avg_gr = float(cand_stats.get("avg_gr_db", cand_stats.get("min_gain_db", -999.0)))
         min_gain_db = float(cand_stats.get("min_gain_db", -999.0))
+        gain_db = float(cand_stats.get("gain_db", 0.0))
+        dyn_gr_limit = _dynamic_governor_gr_limit(float(preset.governor_gr_limit_db), gain_db)
+        cand_stats["gr_limit_db"] = float(dyn_gr_limit)
 
-        ok_gr = avg_gr >= float(preset.governor_gr_limit_db)
+        ok_gr = avg_gr >= dyn_gr_limit
         ok_floor = min_gain_db >= min_gain_floor_db
         ok_tp = float(cand_stats.get("tp_dbfs", 0.0)) <= float(preset.ceiling_dbfs + 0.10)
 
@@ -2752,6 +2775,10 @@ def master(target_path: str, out_path: str, preset: Preset,
     final_gr_db = float(best_stats.get("min_gain_db", 0.0))
     post_lufs = float(best_stats.get("post_lufs", integrated_loudness_lufs(y, sr_t)))
     tp = float(best_stats.get("tp_dbfs", lin_to_db(true_peak_estimate(y, sr_t, oversample=preset.limiter_oversample) + 1e-12)))
+    effective_gr_limit_db = _dynamic_governor_gr_limit(
+        float(preset.governor_gr_limit_db),
+        float(best_stats.get("gain_db", 0.0)),
+    )
 
     # --- EXPERT EXPORT ROUTING ---
     # If the MCP requested 32/64-bit float, override the subtype and disable dither
@@ -2773,6 +2800,7 @@ def master(target_path: str, out_path: str, preset: Preset,
         "governor_target_lufs": float(governor_target),
         "governor_steps": int(steps),
         "governor_gr_limit_db": float(preset.governor_gr_limit_db),
+        "governor_gr_limit_db_effective": float(effective_gr_limit_db),
         "lufs_pre": float(pre_lufs),
         "lufs_post": float(post_lufs),
         "true_peak_dbfs": float(tp),
@@ -2842,6 +2870,8 @@ def master(target_path: str, out_path: str, preset: Preset,
             f.write(f"- Requested target LUFS: **{preset.target_lufs}**\n")
             f.write(f"- Governor final target LUFS: **{result['governor_target_lufs']}**\n")
             f.write(f"- Governor steps: **{result['governor_steps']}** (binary search)\n")
+            f.write(f"- Governor GR ceiling (base): **{result['governor_gr_limit_db']:.2f} dB**\n")
+            f.write(f"- Governor GR ceiling (effective): **{result['governor_gr_limit_db_effective']:.2f} dB**\n")
             f.write(f"- Limiter mode: **{result['limiter_mode']}**\n")
             if result.get('limiter_avg_gr_db') is not None:
                 f.write(f"- Limiter avg gain (dB): **{result['limiter_avg_gr_db']:.2f}** (closer to 0 = less overall limiting)\n")
