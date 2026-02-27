@@ -1987,7 +1987,7 @@ def demucs_separate_stems(
     Separate stereo audio into stems using Demucs (e.g., HT-Demucs).
     Returns (stems, info). Stems are np.float32 arrays shaped [N,2] at the original sr.
     """
-    if not _HAS_DEMUCS:
+    if not HAS_DEMUCS:
         raise RuntimeError(
             "Demucs is not available. Install requirements: torch + demucs "
             "(e.g., pip install torch demucs)."
@@ -2503,7 +2503,7 @@ def master(target_path: str, out_path: str, preset: Preset,
     # ---------------------------------------------------------------------
     stems_info: Dict[str, Any] = {"enabled": False}
     if preset.enable_stem_separation:
-        if not _HAS_DEMUCS:
+        if not HAS_DEMUCS:
             stems_info = {"enabled": False, "reason": "demucs_not_installed"}
         else:
             try:

@@ -1644,6 +1644,6 @@ def read_artifact(
 # ===========================================================================
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    port = int(os.environ.get("PORT", "8000"))
+    port = int(os.environ.get("PORT", "8080"))
     # Enforce streamable http but spec says http
     mcp.run(transport="http", host="0.0.0.0", port=port)
