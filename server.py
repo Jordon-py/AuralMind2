@@ -51,7 +51,9 @@ from starlette.middleware.cors import CORSMiddleware
 log = logging.getLogger("auralmind.server")
 
 SERVER_NAME = "AuralMind Maestro v7.3 Pro-Agent"
+
 Platform = Literal["spotify", "apple_music", "youtube", "soundcloud", "club"]
+# prefer float64 for audio processing and float32 for audio output
 BitDepth = Literal["float32", "float64"]
 
 # ---------------------------------------------------------------------------
@@ -60,6 +62,7 @@ BitDepth = Literal["float32", "float64"]
 mcp = FastMCP(
     SERVER_NAME,
     on_duplicate="error",
+    tasks=True
 )
 
 _http_middleware = [
@@ -86,7 +89,7 @@ app = mcp.http_app(
 # ---------------------------------------------------------------------------
 # Session storage
 # ---------------------------------------------------------------------------
-STORAGE_DIR = os.path.abspath("./maestro_sessions")
+STORAGE_DIR = os.path.abspath("/tmp/maestro_sessions")
 os.makedirs(STORAGE_DIR, exist_ok=True)
 
 SYSTEM_PROMPT_PATH = os.path.join(
@@ -100,8 +103,8 @@ MCP_DOCS_PATH = os.path.join(
 # Upload safety caps
 # ---------------------------------------------------------------------------
 MAX_UPLOAD_BYTES = 400 * 1024 * 1024  # 400 MB after decode
-MAX_UPLOAD_HEX_CHARS = MAX_UPLOAD_BYTES * 2
-MAX_READ_BYTES = 2 * 1024 * 1024  # 2 MB chunks for artifact reads
+MAX_UPLOAD_HEX_CHARS = MAX_UPLOAD_BYTES * 4
+MAX_READ_BYTES = 4 * 1024 * 1024  # 2 MB chunks for artifact reads
 HANDLE_RE = re.compile(r"^(aud|art|job)_[a-f0-9]{12}$")
 
 _ARTIFACTS_LOCK = threading.Lock()
@@ -752,11 +755,8 @@ def get_server_info() -> str:
 # ===========================================================================
 # PROMPTS
 # ===========================================================================
-# ===========================================================================
-# PROMPTS
-# ===========================================================================
 @mcp.prompt(name="on_connect")
-def on_connect_prompt() -> list[Message]:
+async def on_connect_prompt() -> list[Message]:
     """Directed onboarding for new clients."""
     return [
         Message(
@@ -769,7 +769,7 @@ def on_connect_prompt() -> list[Message]:
 
 
 @mcp.prompt(name="master_once")
-def master_once_prompt(
+async def master_once_prompt(
     file_uri: str,
     goal: str,
     platform: Platform = "spotify"
@@ -822,10 +822,6 @@ def generate_strategy(
 # ===========================================================================
 # TOOLS
 # ===========================================================================
-# ===========================================================================
-# TOOLS
-# ===========================================================================
-
 @mcp.tool()
 def bootstrap() -> BootstrapOut:
     """First-contact discovery: returns capabilities, catalogs, and example calls."""
