@@ -28,9 +28,9 @@ deployments:
 - name: Auralmindv2.1
   version: null
   tags: []
-  concurrency_limit: null
+  concurrency_limit: 2
   description: null
-  entrypoint: flows/prefect_master_flow.py:mastering_flow
+  entrypoint: server.py:mastering_flow
   parameters: {}
   work_pool:
     name: AuralMindv2

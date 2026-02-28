@@ -58,6 +58,22 @@
       "meta": null
     },
     {
+      "key": "get_connect_packet",
+      "name": "get_connect_packet",
+      "description": "Returns a first-contact packet with song preview and call templates.",
+      "input_schema": {
+        "properties": {},
+        "title": "get_connect_packetArguments",
+        "type": "object"
+      },
+      "output_schema": null,
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
       "key": "list_audio_assets",
       "name": "list_audio_assets",
       "description": "List audio files available inside the data directory.",
@@ -980,6 +996,18 @@
       "uri": "auralmind://contracts",
       "name": "ToolContracts",
       "description": "Simplified tool I/O contracts.",
+      "mime_type": "application/json",
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "auralmind://connect-kit",
+      "uri": "auralmind://connect-kit",
+      "name": "ConnectKit",
+      "description": "Connect-time discovery payload with song preview and next-call templates.",
       "mime_type": "application/json",
       "annotations": null,
       "tags": null,

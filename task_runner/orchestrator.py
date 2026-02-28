@@ -46,7 +46,7 @@ def main() -> None:
             "--target", "C:\\Users\\goku\\Downloads\\Vegas - top teir (21).wav",
             "--out", "C:\\Users\\goku\\Downloads\\Vegas - top teir (21) god_3d.wav",
             "--report", "C:\\Users\\goku\\Downloads\\Vegas - top teir (21) MASTER_trap_god_3d_Report.md",
-            "--preset", "hi_fi_streaming",
+            "--preset", "club_clean",
             "--mono-sub",
             "--target-lufs", "-13.0",
             "--ceiling", "-1.2",
