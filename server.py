@@ -34,8 +34,6 @@ Architecture
                           -> safe_write_text           (sync,  allowlist write)
 """
 
-
-
 import os
 import re
 import json
@@ -54,11 +52,10 @@ from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Tuple, Literal, Annotated, Callable
 
-from fastmcp import FastMCP, Context
-from fastmcp.prompts import Message, PromptResult
+from mcp.server.fastmcp import FastMCP, Context
+from mcp.server.fastmcp.prompts.base import Message
 from pydantic import BaseModel, Field, ConfigDict, RootModel, model_validator
 import soundfile as sf
-from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 
 load_dotenv(".env")
@@ -75,34 +72,33 @@ JobStatus = Literal["queued", "running", "done", "error"]
 # ---------------------------------------------------------------------------
 # FastMCP server instance
 # ---------------------------------------------------------------------------
+DEFAULT_HOST = os.environ.get("HOST", "0.0.0.0")
+DEFAULT_PORT = int(os.environ.get("PORT", "8080"))
+
 mcp = FastMCP(
-    SERVER_NAME,
-    on_duplicate="error",
-    tasks=False
-)
-
-_http_middleware = [
-    Middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-        allow_headers=[
-            "mcp-protocol-version",
-            "mcp-session-id",
-            "Authorization",
-            "Content-Type",
-        ],
-        expose_headers=["mcp-session-id"],
-    )
-]
-
-app = mcp.http_app(
-    path="/mcp",
-    middleware=_http_middleware,
-    json_response=True,
+    name=SERVER_NAME,
+    host=DEFAULT_HOST,
+    port=DEFAULT_PORT,
+    streamable_http_path="/mcp",
     stateless_http=True,
-    transport="streamable-http",
+    json_response=True,
 )
+
+
+app = mcp.streamable_http_app()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "mcp-protocol-version",
+        "mcp-session-id",
+        "Authorization",
+        "Content-Type",
+    ],
+    expose_headers=["mcp-session-id"],
+)
+
 
 # ---------------------------------------------------------------------------
 # Session storage
@@ -1299,7 +1295,6 @@ def get_contracts_resource() -> str:
     description="Cognitive mastering system prompt.",
     mime_type="text/markdown",
     annotations={"readOnlyHint": True, "idempotentHint": True},
-    tags={"config"},
 )
 def get_system_prompt() -> str:
     """Returns the AuralMind Cognitive Mastering system prompt."""
@@ -1313,7 +1308,6 @@ def get_system_prompt() -> str:
     description="LLM-facing MCP usage guide for AuralMind Maestro.",
     mime_type="text/markdown",
     annotations={"readOnlyHint": True, "idempotentHint": True},
-    tags={"config", "docs"},
 )
 def get_mcp_docs() -> str:
     """Returns the MCP usage guide bundled with the server."""
@@ -1327,7 +1321,6 @@ def get_mcp_docs() -> str:
     description="Server configuration and limits.",
     mime_type="application/json",
     annotations={"readOnlyHint": True, "idempotentHint": True},
-    tags={"config"},
 )
 def get_server_info() -> str:
     """Provides server metadata and limits as JSON."""
@@ -1393,13 +1386,12 @@ def master_closed_loop_prompt(
 @mcp.prompt(
     name="generate-mastering-strategy",
     description="Legacy strategy generator.",
-    tags={"mastering", "prompt"},
 )
 def generate_strategy(
     integrated_lufs: Annotated[float, Field(description="Integrated loudness (LUFS).")],
     crest_db: Annotated[float, Field(description="Crest factor (dB).")],
     platform: Annotated[Platform, Field(description="Target platform.")],
-) -> PromptResult:
+) -> str:
     """Generates a prompt with the system instructions and measured metrics."""
     prompt_content = get_system_prompt()
     metrics = {
@@ -1412,10 +1404,7 @@ def generate_strategy(
         f"INPUT_METRICS:\n{json.dumps(metrics, indent=2)}\n\n"
         "Respond with the JSON strategy object."
     )
-    return PromptResult(
-        messages=[Message(role="user", content=prompt)],
-        description="Mastering strategy prompt with embedded metrics.",
-    )
+    return prompt
 
 
 # ===========================================================================
@@ -2141,12 +2130,7 @@ def read_artifact(
 # Entrypoint
 # ===========================================================================
 if __name__ == "__main__":
-      port = int(os.environ.get("PORT", "8080"))
-      mcp.run(
-          transport="streamable-http",
-          stateless_http=True,
-          host="0.0.0.0",
-          port=port,
-          path="/mcp",  # keep this if your clients expect /mcp
-      )
+    mcp.run(
+        transport="streamable-http",
+    )
 
