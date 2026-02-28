@@ -1,0 +1,1028 @@
+{
+  "server": {
+    "name": "AuralMind Maestro v7.3 Pro-Agent",
+    "instructions": null,
+    "version": null,
+    "website_url": null,
+    "icons": null,
+    "generation": 1,
+    "capabilities": {
+      "tools": {
+        "listChanged": true
+      },
+      "resources": {
+        "subscribe": false,
+        "listChanged": false
+      },
+      "prompts": {
+        "listChanged": false
+      },
+      "logging": {}
+    }
+  },
+  "environment": {
+    "fastmcp": "3.0.2",
+    "mcp": "1.26.0"
+  },
+  "tools": [
+    {
+      "key": "bootstrap",
+      "name": "bootstrap",
+      "description": "First-contact discovery: returns capabilities, catalogs, and example calls.",
+      "input_schema": {
+        "properties": {},
+        "title": "bootstrapArguments",
+        "type": "object"
+      },
+      "output_schema": null,
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "capabilities",
+      "name": "capabilities",
+      "description": "Returns server capabilities and features.",
+      "input_schema": {
+        "properties": {},
+        "title": "capabilitiesArguments",
+        "type": "object"
+      },
+      "output_schema": null,
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "list_audio_assets",
+      "name": "list_audio_assets",
+      "description": "List audio files available inside the data directory.",
+      "input_schema": {
+        "properties": {},
+        "title": "list_audio_assetsArguments",
+        "type": "object"
+      },
+      "output_schema": null,
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "list_data_audio",
+      "name": "list_data_audio",
+      "description": "Alias for list_audio_assets for client compatibility.",
+      "input_schema": {
+        "properties": {},
+        "title": "list_data_audioArguments",
+        "type": "object"
+      },
+      "output_schema": null,
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "register_audio_from_path",
+      "name": "register_audio_from_path",
+      "description": "Register a server-side audio file without upload.",
+      "input_schema": {
+        "properties": {
+          "path": {
+            "description": "Path to an audio file within the data directory.",
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "register_audio_from_pathArguments",
+        "type": "object"
+      },
+      "output_schema": null,
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "analyze_audio",
+      "name": "analyze_audio",
+      "description": "Comprehensive pre-mastering analysis.",
+      "input_schema": {
+        "properties": {
+          "audio_id": {
+            "description": "Audio ID to analyze.",
+            "title": "Audio Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "audio_id"
+        ],
+        "title": "analyze_audioArguments",
+        "type": "object"
+      },
+      "output_schema": null,
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "list_presets",
+      "name": "list_presets",
+      "description": "List all available mastering presets.",
+      "input_schema": {
+        "properties": {},
+        "title": "list_presetsArguments",
+        "type": "object"
+      },
+      "output_schema": null,
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "propose_master_settings",
+      "name": "propose_master_settings",
+      "description": "Validate and clamp settings before job submission.",
+      "input_schema": {
+        "properties": {
+          "preset_name": {
+            "default": "hi_fi_streaming",
+            "description": "Base preset.",
+            "title": "Preset Name",
+            "type": "string"
+          },
+          "target_lufs": {
+            "default": -12.0,
+            "description": "Target LUFS.",
+            "title": "Target Lufs",
+            "type": "number"
+          },
+          "warmth": {
+            "default": 0.5,
+            "description": "Warmth (0-1).",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Warmth",
+            "type": "number"
+          },
+          "transient_boost_db": {
+            "default": 1.0,
+            "description": "Transient boost.",
+            "maximum": 4.0,
+            "minimum": 0.0,
+            "title": "Transient Boost Db",
+            "type": "number"
+          },
+          "enable_harshness_limiter": {
+            "default": true,
+            "description": "Enable harshness filter.",
+            "title": "Enable Harshness Limiter",
+            "type": "boolean"
+          },
+          "enable_air_motion": {
+            "default": true,
+            "description": "Enable spatial air.",
+            "title": "Enable Air Motion",
+            "type": "boolean"
+          },
+          "bit_depth": {
+            "default": "float32",
+            "description": "Output precision.",
+            "enum": [
+              "float32",
+              "float64"
+            ],
+            "title": "Bit Depth",
+            "type": "string"
+          }
+        },
+        "title": "propose_master_settingsArguments",
+        "type": "object"
+      },
+      "output_schema": null,
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "run_master_job",
+      "name": "run_master_job",
+      "description": "Start mastering asynchronously. Returns job_id immediately.",
+      "input_schema": {
+        "properties": {
+          "audio_id": {
+            "description": "Source audio handle.",
+            "title": "Audio Id",
+            "type": "string"
+          },
+          "preset_name": {
+            "default": "hi_fi_streaming",
+            "description": "Base preset.",
+            "title": "Preset Name",
+            "type": "string"
+          },
+          "target_lufs": {
+            "default": -12.0,
+            "description": "Target LUFS.",
+            "title": "Target Lufs",
+            "type": "number"
+          },
+          "warmth": {
+            "default": 0.5,
+            "description": "Warmth (0-1).",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Warmth",
+            "type": "number"
+          },
+          "transient_boost_db": {
+            "default": 1.0,
+            "description": "Transient boost.",
+            "maximum": 4.0,
+            "minimum": 0.0,
+            "title": "Transient Boost Db",
+            "type": "number"
+          },
+          "enable_harshness_limiter": {
+            "default": true,
+            "description": "Enable harshness filter.",
+            "title": "Enable Harshness Limiter",
+            "type": "boolean"
+          },
+          "enable_air_motion": {
+            "default": true,
+            "description": "Enable spatial air.",
+            "title": "Enable Air Motion",
+            "type": "boolean"
+          },
+          "bit_depth": {
+            "default": "float32",
+            "description": "Output precision.",
+            "enum": [
+              "float32",
+              "float64"
+            ],
+            "title": "Bit Depth",
+            "type": "string"
+          }
+        },
+        "required": [
+          "audio_id"
+        ],
+        "title": "run_master_jobArguments",
+        "type": "object"
+      },
+      "output_schema": null,
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "job_status",
+      "name": "job_status",
+      "description": "Poll for job progress.",
+      "input_schema": {
+        "properties": {
+          "job_id": {
+            "description": "Job ID.",
+            "title": "Job Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "title": "job_statusArguments",
+        "type": "object"
+      },
+      "output_schema": null,
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "job_result",
+      "name": "job_result",
+      "description": "Fetch results once a job is complete.",
+      "input_schema": {
+        "properties": {
+          "job_id": {
+            "description": "Job ID.",
+            "title": "Job Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "title": "job_resultArguments",
+        "type": "object"
+      },
+      "output_schema": null,
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "safe_read_text",
+      "name": "safe_read_text",
+      "description": "Safely read a text file within session or data directories.",
+      "input_schema": {
+        "$defs": {
+          "FileReadIn": {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "description": "File path to read (within allowlist).",
+                "title": "Path",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "title": "FileReadIn",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "req": {
+            "$ref": "#/$defs/FileReadIn"
+          }
+        },
+        "required": [
+          "req"
+        ],
+        "title": "safe_read_textArguments",
+        "type": "object"
+      },
+      "output_schema": null,
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "safe_write_text",
+      "name": "safe_write_text",
+      "description": "Safely write a text file within session or data directories.",
+      "input_schema": {
+        "$defs": {
+          "FileWriteIn": {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "description": "File path to write (within allowlist).",
+                "title": "Path",
+                "type": "string"
+              },
+              "content": {
+                "description": "Text content to write.",
+                "title": "Content",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "content"
+            ],
+            "title": "FileWriteIn",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "req": {
+            "$ref": "#/$defs/FileWriteIn"
+          }
+        },
+        "required": [
+          "req"
+        ],
+        "title": "safe_write_textArguments",
+        "type": "object"
+      },
+      "output_schema": null,
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "master_audio",
+      "name": "master_audio",
+      "description": "Run a single mastering pass on the provided audio.",
+      "input_schema": {
+        "$defs": {
+          "MasterRequest": {
+            "additionalProperties": false,
+            "properties": {
+              "preset_name": {
+                "default": "hi_fi_streaming",
+                "description": "Base preset.",
+                "title": "Preset Name",
+                "type": "string"
+              },
+              "target_lufs": {
+                "default": -12.0,
+                "description": "Target LUFS.",
+                "title": "Target Lufs",
+                "type": "number"
+              },
+              "warmth": {
+                "default": 0.5,
+                "description": "Warmth (0-1).",
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "title": "Warmth",
+                "type": "number"
+              },
+              "transient_boost_db": {
+                "default": 1.0,
+                "description": "Transient boost.",
+                "maximum": 4.0,
+                "minimum": 0.0,
+                "title": "Transient Boost Db",
+                "type": "number"
+              },
+              "enable_harshness_limiter": {
+                "default": true,
+                "description": "Enable harshness filter.",
+                "title": "Enable Harshness Limiter",
+                "type": "boolean"
+              },
+              "enable_air_motion": {
+                "default": true,
+                "description": "Enable spatial air.",
+                "title": "Enable Air Motion",
+                "type": "boolean"
+              },
+              "bit_depth": {
+                "default": "float32",
+                "description": "Output precision.",
+                "enum": [
+                  "float32",
+                  "float64"
+                ],
+                "title": "Bit Depth",
+                "type": "string"
+              },
+              "audio_id": {
+                "description": "Source audio handle.",
+                "title": "Audio Id",
+                "type": "string"
+              }
+            },
+            "required": [
+              "audio_id"
+            ],
+            "title": "MasterRequest",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "req": {
+            "$ref": "#/$defs/MasterRequest"
+          }
+        },
+        "required": [
+          "req"
+        ],
+        "title": "master_audioArguments",
+        "type": "object"
+      },
+      "output_schema": null,
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "master_closed_loop",
+      "name": "master_closed_loop",
+      "description": "Deterministic closed-loop mastering orchestrator (max 2 runs).",
+      "input_schema": {
+        "$defs": {
+          "ClosedLoopRequest": {
+            "additionalProperties": false,
+            "properties": {
+              "audio_id": {
+                "description": "Source audio handle.",
+                "title": "Audio Id",
+                "type": "string"
+              },
+              "goal": {
+                "description": "Mastering goal (e.g. 'Club-ready', 'Intimate Acoustic').",
+                "title": "Goal",
+                "type": "string"
+              },
+              "platform": {
+                "default": "spotify",
+                "description": "Target platform.",
+                "enum": [
+                  "spotify",
+                  "apple_music",
+                  "youtube",
+                  "soundcloud",
+                  "club"
+                ],
+                "title": "Platform",
+                "type": "string"
+              }
+            },
+            "required": [
+              "audio_id",
+              "goal"
+            ],
+            "title": "ClosedLoopRequest",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "req": {
+            "$ref": "#/$defs/ClosedLoopRequest"
+          }
+        },
+        "required": [
+          "req"
+        ],
+        "title": "master_closed_loopArguments",
+        "type": "object"
+      },
+      "output_schema": null,
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "upload_init",
+      "name": "upload_init",
+      "description": "Initialize a resumable chunked upload.",
+      "input_schema": {
+        "$defs": {
+          "UploadInitIn": {
+            "additionalProperties": false,
+            "properties": {
+              "filename": {
+                "description": "Original filename.",
+                "title": "Filename",
+                "type": "string"
+              },
+              "total_bytes": {
+                "description": "Total decoded byte length.",
+                "maximum": 419430400,
+                "minimum": 1,
+                "title": "Total Bytes",
+                "type": "integer"
+              },
+              "sha256": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Expected lowercase SHA-256 hex digest.",
+                "title": "Sha256"
+              }
+            },
+            "required": [
+              "filename",
+              "total_bytes"
+            ],
+            "title": "UploadInitIn",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "req": {
+            "$ref": "#/$defs/UploadInitIn"
+          }
+        },
+        "required": [
+          "req"
+        ],
+        "title": "upload_initArguments",
+        "type": "object"
+      },
+      "output_schema": null,
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "upload_status",
+      "name": "upload_status",
+      "description": "Read resumable upload status.",
+      "input_schema": {
+        "properties": {
+          "upload_id": {
+            "description": "Upload handle from upload_init.",
+            "title": "Upload Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "upload_id"
+        ],
+        "title": "upload_statusArguments",
+        "type": "object"
+      },
+      "output_schema": null,
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "upload_chunk",
+      "name": "upload_chunk",
+      "description": "Append one ordered chunk to an active upload.",
+      "input_schema": {
+        "$defs": {
+          "UploadChunkIn": {
+            "additionalProperties": false,
+            "properties": {
+              "upload_id": {
+                "description": "Upload handle from upload_init.",
+                "title": "Upload Id",
+                "type": "string"
+              },
+              "index": {
+                "description": "Sequential chunk index starting at 0.",
+                "minimum": 0,
+                "title": "Index",
+                "type": "integer"
+              },
+              "chunk_b64": {
+                "description": "Base64 chunk payload.",
+                "title": "Chunk B64",
+                "type": "string"
+              }
+            },
+            "required": [
+              "upload_id",
+              "index",
+              "chunk_b64"
+            ],
+            "title": "UploadChunkIn",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "req": {
+            "$ref": "#/$defs/UploadChunkIn"
+          }
+        },
+        "required": [
+          "req"
+        ],
+        "title": "upload_chunkArguments",
+        "type": "object"
+      },
+      "output_schema": null,
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "upload_finalize",
+      "name": "upload_finalize",
+      "description": "Finalize upload, verify checksum, and register audio artifact.",
+      "input_schema": {
+        "$defs": {
+          "UploadFinalizeIn": {
+            "additionalProperties": false,
+            "properties": {
+              "upload_id": {
+                "description": "Upload handle from upload_init.",
+                "title": "Upload Id",
+                "type": "string"
+              }
+            },
+            "required": [
+              "upload_id"
+            ],
+            "title": "UploadFinalizeIn",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "req": {
+            "$ref": "#/$defs/UploadFinalizeIn"
+          }
+        },
+        "required": [
+          "req"
+        ],
+        "title": "upload_finalizeArguments",
+        "type": "object"
+      },
+      "output_schema": null,
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "upload_audio_to_session",
+      "name": "upload_audio_to_session",
+      "description": "Upload audio for processing.",
+      "input_schema": {
+        "properties": {
+          "filename": {
+            "description": "Original filename.",
+            "title": "Filename",
+            "type": "string"
+          },
+          "payload_b64": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Base64 payload.",
+            "title": "Payload B64"
+          },
+          "hex_payload": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Hex payload (legacy).",
+            "title": "Hex Payload"
+          }
+        },
+        "required": [
+          "filename"
+        ],
+        "title": "upload_audio_to_sessionArguments",
+        "type": "object"
+      },
+      "output_schema": null,
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "read_artifact",
+      "name": "read_artifact",
+      "description": "Read artifact bytes.",
+      "input_schema": {
+        "properties": {
+          "artifact_id": {
+            "description": "Artifact ID.",
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "offset": {
+            "default": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "length": {
+            "default": 2097152,
+            "title": "Length",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "artifact_id"
+        ],
+        "title": "read_artifactArguments",
+        "type": "object"
+      },
+      "output_schema": null,
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    }
+  ],
+  "prompts": [
+    {
+      "key": "on_connect",
+      "name": "on_connect",
+      "description": "Directed onboarding for new clients.",
+      "arguments": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "master_once",
+      "name": "master_once",
+      "description": "Single-pass mastering guide.",
+      "arguments": [
+        {
+          "name": "file_uri",
+          "description": null,
+          "required": true
+        },
+        {
+          "name": "goal",
+          "description": null,
+          "required": true
+        },
+        {
+          "name": "platform",
+          "description": null,
+          "required": false
+        }
+      ],
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "master_closed_loop_prompt",
+      "name": "master_closed_loop_prompt",
+      "description": "Deterministic 2nd-run planning prompt.",
+      "arguments": [
+        {
+          "name": "file_uri",
+          "description": null,
+          "required": true
+        },
+        {
+          "name": "goal",
+          "description": null,
+          "required": true
+        },
+        {
+          "name": "platform",
+          "description": null,
+          "required": false
+        }
+      ],
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "generate-mastering-strategy",
+      "name": "generate-mastering-strategy",
+      "description": "Legacy strategy generator.",
+      "arguments": [
+        {
+          "name": "integrated_lufs",
+          "description": "Integrated loudness (LUFS).",
+          "required": true
+        },
+        {
+          "name": "crest_db",
+          "description": "Crest factor (dB).",
+          "required": true
+        },
+        {
+          "name": "platform",
+          "description": "Target platform.",
+          "required": true
+        }
+      ],
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    }
+  ],
+  "resources": [
+    {
+      "key": "auralmind://workflow",
+      "uri": "auralmind://workflow",
+      "name": "WorkflowSteps",
+      "description": "Ordered steps for mastering.",
+      "mime_type": "application/json",
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "auralmind://metrics",
+      "uri": "auralmind://metrics",
+      "name": "MetricsThresholds",
+      "description": "Scoring thresholds and target metrics.",
+      "mime_type": "application/json",
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "auralmind://presets",
+      "uri": "auralmind://presets",
+      "name": "PresetsAtlas",
+      "description": "Detailed preset guide.",
+      "mime_type": "application/json",
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "auralmind://contracts",
+      "uri": "auralmind://contracts",
+      "name": "ToolContracts",
+      "description": "Simplified tool I/O contracts.",
+      "mime_type": "application/json",
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "config://system-prompt",
+      "uri": "config://system-prompt",
+      "name": "SystemPrompt",
+      "description": "Cognitive mastering system prompt.",
+      "mime_type": "text/markdown",
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "config://mcp-docs",
+      "uri": "config://mcp-docs",
+      "name": "McpDocs",
+      "description": "LLM-facing MCP usage guide for AuralMind Maestro.",
+      "mime_type": "text/markdown",
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    },
+    {
+      "key": "config://server-info",
+      "uri": "config://server-info",
+      "name": "ServerInfo",
+      "description": "Server configuration and limits.",
+      "mime_type": "application/json",
+      "annotations": null,
+      "tags": null,
+      "title": null,
+      "icons": null,
+      "meta": null
+    }
+  ],
+  "templates": []
+}
