@@ -5,15 +5,16 @@ server data directory, then reuse returned handles instead of filesystem paths.
 
 ## Quick Flow (Recommended)
 
-1) `list_audio_assets`
-2) `register_audio_from_path`
-3) `analyze_audio`
-4) Optional: `generate-mastering-strategy`
-5) `propose_master_settings`
-6) `run_master_job`
-7) Poll `job_status`
-8) `job_result`
-9) `read_artifact` (audio/JSON download)
+1) `get_connect_packet` (or read `auralmind://connect-kit`)
+2) `list_data_audio` (or `list_audio_assets`)
+3) `register_audio_from_path`
+4) `analyze_audio`
+5) Optional: `generate-mastering-strategy`
+6) `propose_master_settings`
+7) `run_master_job`
+8) Poll `job_status`
+9) `job_result`
+10) `read_artifact` (audio/JSON download)
 
 Optional: `master_closed_loop` for a 2-pass auto master.
 Legacy: `upload_audio_to_session` for client-side uploads.
@@ -23,6 +24,7 @@ Legacy: `upload_audio_to_session` for client-side uploads.
 - `config://system-prompt` - cognitive mastering instructions (markdown).
 - `config://mcp-docs` - this document (markdown).
 - `config://server-info` - server limits and supported bit depth (JSON).
+- `auralmind://connect-kit` - first-contact song preview + next-call templates (JSON).
 - `auralmind://workflow` - ordered mastering workflow (JSON).
 - `auralmind://metrics` - scoring thresholds (JSON).
 - `auralmind://presets` - preset atlas (JSON).
@@ -40,6 +42,18 @@ Parameters:
 Returns a prompt that embeds the system prompt plus the provided metrics.
 
 ## Tools
+
+### get_connect_packet
+
+Returns a first-contact packet designed for immediate client onboarding.
+
+Fields include:
+
+- `generated_at`, `preview_limit`, `total_songs`
+- `songs_preview` (most recently modified songs in `data/`, max 10)
+- `recommended_first_path`
+- `workflow_steps`
+- `example_calls` (ready-to-run templates)
 
 ### list_audio_assets
 

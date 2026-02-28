@@ -127,6 +127,7 @@ MAX_UPLOAD_HEX_CHARS = MAX_UPLOAD_BYTES * 2
 UPLOAD_CHUNK_MAX_BYTES = int(os.environ.get("UPLOAD_CHUNK_MAX_BYTES", str(1024 * 1024)))  # 1 MiB
 MAX_UPLOAD_CHUNK_B64_CHARS = int(UPLOAD_CHUNK_MAX_BYTES * 4 / 3) + 4
 MAX_READ_BYTES = 2 * 1024 * 1024  # 2 MB chunks for artifact reads
+CONNECT_PREVIEW_LIMIT = 10
 ALLOWED_AUDIO_EXTENSIONS = {".wav", ".flac", ".ogg", ".aif", ".aiff", ".mp3"}
 HANDLE_RE = re.compile(r"^(aud|art|job)_[a-f0-9]{12}$")
 UPLOAD_ID_RE = re.compile(r"^upl_[a-f0-9]{12}$")
@@ -399,6 +400,24 @@ class AudioAssetList(RootModel[List[AudioAssetInfo]]):
     pass
 
 
+class ConnectSongPreview(StrictBaseModel):
+    filename: str = Field(..., description="Base filename inside the data directory.")
+    size_bytes: int = Field(..., description="File size in bytes.")
+    format: str = Field(..., description="Audio format extension without dot.")
+    duration_seconds: Optional[float] = Field(None, description="Optional duration in seconds.")
+    modified_at: str = Field(..., description="UTC ISO-8601 last-modified timestamp.")
+
+
+class ConnectPacketOut(StrictBaseModel):
+    generated_at: str = Field(..., description="UTC ISO-8601 packet generation timestamp.")
+    preview_limit: int = Field(..., description="Maximum songs included in preview.")
+    total_songs: int = Field(..., description="Total matching songs in data directory.")
+    songs_preview: List[ConnectSongPreview] = Field(..., description="Most recent songs available to master.")
+    recommended_first_path: str = Field(..., description="Suggested first path based on song availability.")
+    workflow_steps: List[str] = Field(..., description="Ordered first-contact workflow guidance.")
+    example_calls: Dict[str, Any] = Field(..., description="Copy/paste tool call templates.")
+
+
 class RegisterAudioPathIn(StrictBaseModel):
     path: str = Field(..., description="Path to an audio file within the data directory.")
 
@@ -532,6 +551,96 @@ def _safe_audio_duration(path: str) -> Optional[float]:
     if duration is None:
         return None
     return round(float(duration), 3)
+
+
+def _iso_utc(ts: float) -> str:
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _scan_connect_previews() -> List[ConnectSongPreview]:
+    indexed: List[Tuple[float, ConnectSongPreview]] = []
+    with os.scandir(DATA_DIR) as entries:
+        for entry in entries:
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            ext = os.path.splitext(entry.name)[1].lower()
+            if ext not in ALLOWED_AUDIO_EXTENSIONS:
+                continue
+            try:
+                st = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            modified = float(st.st_mtime)
+            indexed.append(
+                (
+                    modified,
+                    ConnectSongPreview(
+                        filename=entry.name,
+                        size_bytes=int(st.st_size),
+                        format=ext[1:],
+                        duration_seconds=_safe_audio_duration(entry.path),
+                        modified_at=_iso_utc(modified),
+                    ),
+                )
+            )
+    indexed.sort(key=lambda item: (-item[0], item[1].filename.lower()))
+    return [item[1] for item in indexed]
+
+
+def _build_connect_packet(preview_limit: int = CONNECT_PREVIEW_LIMIT) -> ConnectPacketOut:
+    limit = max(1, int(preview_limit))
+    catalog = _scan_connect_previews()
+    preview = catalog[:limit]
+    sample_path = preview[0].filename if preview else "song.wav"
+    recommended = "register_from_data" if catalog else "upload_then_master"
+
+    workflow_steps = [
+        "1. get_connect_packet or read auralmind://connect-kit",
+        "2. list_data_audio",
+        "3. register_audio_from_path",
+        "4. analyze_audio",
+        "5. run_master_job (or master_closed_loop)",
+        "6. job_status + job_result + read_artifact",
+    ]
+    if not catalog:
+        workflow_steps.insert(2, "3. upload_init -> upload_chunk -> upload_finalize")
+
+    example_calls: Dict[str, Any] = {
+        "list_data_audio": {},
+        "register_audio_from_path": {"path": sample_path},
+        "analyze_audio": {"audio_id": "aud_1234567890ab"},
+        "run_master_job": {
+            "audio_id": "aud_1234567890ab",
+            "preset_name": "hi_fi_streaming",
+            "target_lufs": -12.0,
+            "warmth": 0.5,
+            "transient_boost_db": 1.0,
+            "enable_harshness_limiter": True,
+            "enable_air_motion": True,
+            "bit_depth": "float32",
+        },
+        "job_status": {"job_id": "job_1234567890ab"},
+        "job_result": {"job_id": "job_1234567890ab"},
+        "master_closed_loop": {
+            "audio_id": "aud_1234567890ab",
+            "goal": "Streaming-ready, clear and punchy",
+            "platform": "spotify",
+        },
+    }
+    if not catalog:
+        example_calls["upload_init"] = {"filename": "song.wav", "total_bytes": 12345678, "sha256": "<sha256>"}
+        example_calls["upload_chunk"] = {"upload_id": "upl_1234567890ab", "index": 0, "chunk_b64": "<base64-chunk>"}
+        example_calls["upload_finalize"] = {"upload_id": "upl_1234567890ab"}
+
+    return ConnectPacketOut(
+        generated_at=_iso_utc(time.time()),
+        preview_limit=limit,
+        total_songs=len(catalog),
+        songs_preview=preview,
+        recommended_first_path=recommended,
+        workflow_steps=workflow_steps,
+        example_calls=example_calls,
+    )
 
 
 def _decode_base64_payload(payload_b64: str) -> bytes:
@@ -1156,16 +1265,17 @@ def _run_master_job_worker(job_id: str) -> None:
 )
 async def get_workflow_resource() -> str:
     steps = [
-        "1. bootstrap: Call to see available tools and initial workflow.",
-        "2. list_data_audio (or list_audio_assets): Enumerate available audio in the data directory.",
-        "3. register_audio_from_path: Register a file for the current session.",
-        "4. analyze_audio: Get initial metrics.",
-        "5. list_presets: Explore available mastering presets.",
-        "6. propose_master_settings: Validate/clamp settings.",
-        "7. run_master_job: Start async mastering.",
-        "8. job_status: Poll for completion.",
-        "9. job_result: Fetch artifacts + metrics.",
-        "10. read_artifact: Download WAV/JSON chunks.",
+        "1. bootstrap or get_connect_packet: Start with dynamic discovery payload.",
+        "2. read auralmind://connect-kit: Fetch connect-time packet and call templates.",
+        "3. list_data_audio (or list_audio_assets): Enumerate available audio in the data directory.",
+        "4. register_audio_from_path: Register a file for the current session.",
+        "5. analyze_audio: Get initial metrics.",
+        "6. list_presets: Explore available mastering presets.",
+        "7. propose_master_settings: Validate/clamp settings.",
+        "8. run_master_job: Start async mastering.",
+        "9. job_status: Poll for completion.",
+        "10. job_result: Fetch artifacts + metrics.",
+        "11. read_artifact: Download WAV/JSON chunks.",
         "Optional: master_closed_loop for automated 2-pass mastering.",
         "Optional: upload_init -> upload_chunk -> upload_finalize for resumable uploads.",
         "Optional: upload_audio_to_session for legacy client-side uploads."
@@ -1234,6 +1344,8 @@ def get_presets_resource() -> str:
 )
 def get_contracts_resource() -> str:
     model_schemas = {
+        "ConnectSongPreview": ConnectSongPreview.model_json_schema(),
+        "ConnectPacketOut": ConnectPacketOut.model_json_schema(),
         "AnalyzeIn": AnalyzeIn.model_json_schema(),
         "UploadIn": UploadIn.model_json_schema(),
         "UploadResult": UploadResult.model_json_schema(),
@@ -1266,6 +1378,7 @@ def get_contracts_resource() -> str:
         "FileWriteOut": FileWriteOut.model_json_schema(),
     }
     tool_map = {
+        "get_connect_packet": {"input": "Empty", "output": "ConnectPacketOut"},
         "list_audio_assets": {"input": "Empty", "output": "AudioAssetList"},
         "list_data_audio": {"input": "Empty", "output": "AudioAssetList"},
         "register_audio_from_path": {"input": "RegisterAudioPathIn", "output": "RegisterAudioResult"},
@@ -1287,6 +1400,26 @@ def get_contracts_resource() -> str:
         "safe_write_text": {"input": "FileWriteIn", "output": "FileWriteOut"},
     }
     return json.dumps({"models": model_schemas, "tools": tool_map}, indent=2)
+
+
+@mcp.resource(
+    uri="auralmind://connect-kit",
+    name="ConnectKit",
+    description="Connect-time discovery payload with song preview and next-call templates.",
+    mime_type="application/json",
+    annotations={"readOnlyHint": True, "idempotentHint": True},
+)
+def get_connect_kit_resource() -> str:
+    packet = _build_connect_packet()
+    payload = {
+        "notes": [
+            "Read this resource immediately after connect.",
+            "Use `register_audio_from_path` for server-side files.",
+            "Use `upload_init/upload_chunk/upload_finalize` if no songs are present.",
+        ],
+        "packet": packet.model_dump(),
+    }
+    return json.dumps(payload, indent=2)
 
 
 @mcp.resource(
@@ -1332,6 +1465,7 @@ def get_server_info() -> str:
         "max_upload_hex_chars": MAX_UPLOAD_HEX_CHARS,
         "upload_chunk_max_bytes": UPLOAD_CHUNK_MAX_BYTES,
         "max_upload_chunk_b64_chars": MAX_UPLOAD_CHUNK_B64_CHARS,
+        "connect_preview_limit": CONNECT_PREVIEW_LIMIT,
         "max_read_bytes": MAX_READ_BYTES,
         "supported_bit_depths": ["float32", "float64"],
         "data_dir": DATA_DIR,
@@ -1346,12 +1480,30 @@ def get_server_info() -> str:
 @mcp.prompt(name="on_connect")
 async def on_connect_prompt() -> list[Message]:
     """Directed onboarding for new clients."""
+    packet = _build_connect_packet()
+    preview_names = ", ".join(song.filename for song in packet.songs_preview[:5]) if packet.songs_preview else "None"
+    if packet.total_songs > 0:
+        flow_hint = (
+            "1) call `get_connect_packet` or read `auralmind://connect-kit` "
+            "2) call `list_data_audio` "
+            "3) call `register_audio_from_path` using one preview filename "
+            "4) call `analyze_audio` "
+            "5) call `run_master_job` (or `master_closed_loop`)."
+        )
+    else:
+        flow_hint = (
+            "No songs found in `data/`. "
+            "Use upload flow: `upload_init` -> `upload_chunk` -> `upload_finalize`, then `analyze_audio` and `run_master_job`."
+        )
     return [
         Message(
             role="assistant",
-            content="Welcome to AuralMind Maestro. Please call the `bootstrap` tool first to see available workflows and catalogs. "
-                    "Then read `auralmind://workflow` for step-by-step instructions. "
-                    "Use `config://mcp-docs` for full usage guidance."
+            content=(
+                f"Welcome to AuralMind Maestro. Songs detected: {packet.total_songs}. "
+                f"Recent songs: {preview_names}. "
+                f"{flow_hint} "
+                "Use `bootstrap` for complete catalogs and `config://mcp-docs` for full usage guidance."
+            ),
         )
     ]
 
@@ -1417,6 +1569,7 @@ def bootstrap() -> BootstrapOut:
 
     tools = [
         ToolCatalogEntry(name="bootstrap", description="Discovery", input_model="Empty", output_model="BootstrapOut"),
+        ToolCatalogEntry(name="get_connect_packet", description="Connect-time song preview and call templates", input_model="Empty", output_model="ConnectPacketOut"),
         ToolCatalogEntry(name="list_audio_assets", description="List audio assets", input_model="Empty", output_model="AudioAssetList"),
         ToolCatalogEntry(name="list_data_audio", description="List audio assets (alias)", input_model="Empty", output_model="AudioAssetList"),
         ToolCatalogEntry(name="register_audio_from_path", description="Register audio from path", input_model="RegisterAudioPathIn", output_model="RegisterAudioResult"),
@@ -1442,6 +1595,7 @@ def bootstrap() -> BootstrapOut:
         ResourceCatalogEntry(uri="config://system-prompt", description="System prompt", mime_type="text/markdown", annotations={"readOnlyHint": True}),
         ResourceCatalogEntry(uri="config://mcp-docs", description="Usage docs", mime_type="text/markdown", annotations={"readOnlyHint": True}),
         ResourceCatalogEntry(uri="config://server-info", description="Server limits", mime_type="application/json", annotations={"readOnlyHint": True}),
+        ResourceCatalogEntry(uri="auralmind://connect-kit", description="Connect packet", mime_type="application/json", annotations={"readOnlyHint": True}),
         ResourceCatalogEntry(uri="auralmind://workflow", description="Workflow steps", mime_type="application/json", annotations={"readOnlyHint": True}),
         ResourceCatalogEntry(uri="auralmind://metrics", description="Metrics & Scoring", mime_type="application/json", annotations={"readOnlyHint": True}),
         ResourceCatalogEntry(uri="auralmind://presets", description="Preset Guide", mime_type="application/json", annotations={"readOnlyHint": True}),
@@ -1461,21 +1615,23 @@ def bootstrap() -> BootstrapOut:
         resources=resources,
         prompts=prompts,
         workflow_steps=[
-            "1. bootstrap",
-            "2. list_data_audio (or list_audio_assets)",
-            "3. register_audio_from_path",
-            "4. upload_init/upload_chunk/upload_finalize (optional alternative to #3)",
-            "5. analyze_audio",
-            "6. list_presets",
-            "7. propose_master_settings",
-            "8. run_master_job",
-            "9. job_status",
-            "10. job_result",
-            "11. read_artifact",
+            "1. get_connect_packet or read auralmind://connect-kit",
+            "2. bootstrap",
+            "3. list_data_audio (or list_audio_assets)",
+            "4. register_audio_from_path",
+            "5. upload_init/upload_chunk/upload_finalize (optional alternative to #4)",
+            "6. analyze_audio",
+            "7. list_presets",
+            "8. propose_master_settings",
+            "9. run_master_job",
+            "10. job_status",
+            "11. job_result",
+            "12. read_artifact",
             "Optional: master_closed_loop",
             "Optional: upload_audio_to_session (legacy)",
         ],
         example_calls={
+            "get_connect_packet": {},
             "list_assets": {},
             "list_data_audio": {},
             "register": {"path": "song.wav"},
@@ -1488,6 +1644,7 @@ def bootstrap() -> BootstrapOut:
             "run_job": {"audio_id": "aud_1234567890ab", "preset_name": "hi_fi_streaming"},
             "job_status": {"job_id": "job_1234567890ab"},
             "job_result": {"job_id": "job_1234567890ab"},
+            "closed_loop": {"audio_id": "aud_1234567890ab", "goal": "Streaming-ready, clear and punchy", "platform": "spotify"},
         }
     )
 
@@ -1508,8 +1665,15 @@ def capabilities() -> CapabilitiesOut:
             "server_side_ingest",
             "chunked_upload",
             "stateless_http",
+            "connect_discovery",
         ]
     )
+
+
+@mcp.tool()
+def get_connect_packet() -> ConnectPacketOut:
+    """Returns a first-contact packet with song preview and call templates."""
+    return _build_connect_packet()
 
 
 @mcp.tool()

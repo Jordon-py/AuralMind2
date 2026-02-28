@@ -17,10 +17,12 @@ mastering workflow for LLM clients.
 ```
 LLM client -> FastMCP (stdio / http)
    resources: config://system-prompt, config://mcp-docs, config://server-info
-              auralmind://workflow, auralmind://metrics, auralmind://presets
+              auralmind://connect-kit, auralmind://workflow, auralmind://metrics, auralmind://presets
               auralmind://contracts
    prompts:   generate-mastering-strategy, master_once, master_closed_loop_prompt
-   tools:     list_audio_assets
+   tools:     get_connect_packet
+              list_audio_assets
+              list_data_audio
               register_audio_from_path
               upload_audio_to_session
               analyze_audio
@@ -109,12 +111,8 @@ download artifacts.
 {
   "method": "tools/call",
   "params": {
-    "name": "run_master_job",
-    "arguments": {
-      "audio_id": "aud_1234567890ab",
-      "preset_name": "hi_fi_streaming",
-      "target_lufs": -12.5
-    }
+    "name": "get_connect_packet",
+    "arguments": {}
   }
 }
 ```
@@ -132,6 +130,10 @@ Returns the LLM-facing MCP usage guide from `resources/mcp_docs.md`.
 ### Resource: `config://server-info`
 
 Returns server limits and supported bit depth as JSON.
+
+### Resource: `auralmind://connect-kit`
+
+Returns a first-contact packet with song preview and ready-to-run call templates.
 
 ### Resource: `auralmind://workflow`
 
@@ -160,6 +162,14 @@ generate-mastering-strategy(integrated_lufs: float, crest_db: float, platform: s
 Returns a prompt that embeds the system prompt plus the provided metrics.
 
 ## Tools
+
+### `get_connect_packet`
+
+Returns dynamic connect-time discovery:
+
+- recent songs from `data/` (top 10 by latest modified time)
+- recommended first path
+- explicit example calls for register/analyze/master flows
 
 ### `list_audio_assets`
 

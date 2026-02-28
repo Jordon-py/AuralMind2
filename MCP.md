@@ -9,6 +9,7 @@ Available resources:
 - `config://system-prompt`
 - `config://mcp-docs`
 - `config://server-info`
+- `auralmind://connect-kit`
 - `auralmind://workflow`
 - `auralmind://metrics`
 - `auralmind://presets`
@@ -51,6 +52,18 @@ Example render:
 
 ## Tools
 
+### get_connect_packet
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "get_connect_packet",
+    "arguments": {}
+  }
+}
+```
+
 ### list_audio_assets
 
 ```json
@@ -58,6 +71,18 @@ Example render:
   "method": "tools/call",
   "params": {
     "name": "list_audio_assets",
+    "arguments": {}
+  }
+}
+```
+
+### list_data_audio
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "list_data_audio",
     "arguments": {}
   }
 }
