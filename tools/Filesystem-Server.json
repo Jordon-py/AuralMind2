@@ -1,0 +1,22 @@
+{
+    "mcpServers": {
+      "filesystem": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-filesystem",
+          "C:\\Users\\goku",
+          "C:\\Users\\goku\\Music",
+          "C:\\Users\\goku\\Videos",
+          "C:\\Users\\goku\\Pictures",
+          "C:\\Users\\goku\\Desktop",
+          "C:\\Users\\goku\\Downloads",
+          "C:\\Users\\goku\\Documents",
+          "C:\\Users\\goku\\LLM_uncensored",
+          "C:\\Users\\goku\\Documents\\Projects",
+          "C:\\Users\\goku\\Documents\\Projects\\mcp_mind",
+          "C:\\Users\\goku\\Documents\\Projects\\mcp_mind\\weather"
+        ]
+      }
+    }
+  }

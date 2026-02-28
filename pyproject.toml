@@ -1,0 +1,17 @@
+[project]
+name = "auralmind"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "demucs>=4.0.1",
+    "fastmcp>=3.0.0",
+    "httpx>=0.28.1",
+    "numba>=0.64.0",
+    "numpy>=2.4.2",
+    "ollama>=0.6.1",
+    "pydantic>=2.12.5",
+    "scipy>=1.17.1",
+    "soundfile>=0.13.1",
+]

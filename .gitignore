@@ -1,0 +1,4 @@
+data/*.wav
+maestro_sessions/
+.venv/
+__pycache__/

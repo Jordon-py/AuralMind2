@@ -1,0 +1,16 @@
+asyncio
+fastmcp>=3.0.0
+ffmpeg
+mcp
+numpy
+pydantic
+dotenv
+python-multipart
+scipy
+soundfile
+sse-starlette
+starlette
+torch
+demucs
+mcp[cli]
+fastmcp>=3.0.0

@@ -1,0 +1,209 @@
+{
+  "name": "auralmind-mastering",
+  "version": "1.3.0",
+  "instructions": [
+    "You are an audio mastering operator. Follow the pipeline exactly: list_audio_assets -> register_audio_from_path -> analyze_audio -> generate-mastering-strategy (optional) -> propose_master_settings -> run_master_job -> job_status (poll) -> job_result -> read_artifact.",
+    "Optional shortcut: use master_closed_loop for a 2-pass auto master.",
+    "upload_audio_to_session is legacy. Prefer register_audio_from_path.",
+    "Prefer payload_b64 for uploads. Do not send both payload_b64 and hex_payload.",
+    "Use analyze_audio metrics to set target_lufs and transient_boost_db. Keep true peak <= -1.0 dBTP.",
+    "If upload fails due to size: ask the user to place a WAV/FLAC in the data directory and use register_audio_from_path."
+  ],
+  "tools": [
+    {
+      "name": "list_audio_assets",
+      "description": "List audio files available in the server data directory.",
+      "inputSchema": { "type": "object", "properties": {} },
+      "outputSchema": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "filename": { "type": "string" },
+            "size_bytes": { "type": "integer" },
+            "format": { "type": "string" },
+            "duration_seconds": { "type": "number" }
+          },
+          "required": ["filename", "size_bytes", "format"]
+        }
+      }
+    },
+    {
+      "name": "register_audio_from_path",
+      "description": "Register a server-side audio file by path without upload.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "path": { "type": "string" } },
+        "required": ["path"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "audio_id": { "type": "string" },
+          "format": { "type": "string" },
+          "size_bytes": { "type": "integer" },
+          "checksum": { "type": "string" },
+          "registered_at": { "type": "string" }
+        },
+        "required": ["audio_id", "format", "size_bytes", "checksum", "registered_at"]
+      }
+    },
+    {
+      "name": "upload_audio_to_session",
+      "description": "Legacy upload. Upload an audio file and return an audio_id handle.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "filename": { "type": "string" },
+          "payload_b64": { "type": "string", "description": "Base64-encoded audio payload (preferred)." },
+          "hex_payload": { "type": "string", "description": "Hex-encoded audio payload (legacy)." }
+        },
+        "required": ["filename"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "audio_id": { "type": "string" },
+          "filename": { "type": "string" },
+          "size_bytes": { "type": "integer" },
+          "sha256": { "type": "string" },
+          "media_type": { "type": "string" }
+        },
+        "required": ["audio_id", "filename", "size_bytes", "sha256", "media_type"]
+      }
+    },
+    {
+      "name": "analyze_audio",
+      "description": "Return perceptual metrics for mastering decisions.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "audio_id": { "type": "string" }
+        },
+        "required": ["audio_id"]
+      }
+    },
+    {
+      "name": "list_presets",
+      "description": "Return all available preset names and key parameters.",
+      "inputSchema": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "propose_master_settings",
+      "description": "Validate and clamp settings before job submission.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "preset_name": { "type": "string", "default": "hi_fi_streaming" },
+          "target_lufs": { "type": "number", "default": -12.0 },
+          "warmth": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.5 },
+          "transient_boost_db": { "type": "number", "minimum": 0, "maximum": 4, "default": 1.0 },
+          "enable_harshness_limiter": { "type": "boolean", "default": true },
+          "enable_air_motion": { "type": "boolean", "default": true },
+          "bit_depth": { "type": "string", "enum": ["float32", "float64"], "default": "float32" }
+        }
+      }
+    },
+    {
+      "name": "run_master_job",
+      "description": "Start mastering asynchronously. Returns job_id immediately.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "audio_id": { "type": "string" },
+          "preset_name": { "type": "string", "default": "hi_fi_streaming" },
+          "target_lufs": { "type": "number", "default": -12.0 },
+          "warmth": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.5 },
+          "transient_boost_db": { "type": "number", "minimum": 0, "maximum": 4, "default": 1.0 },
+          "enable_harshness_limiter": { "type": "boolean", "default": true },
+          "enable_air_motion": { "type": "boolean", "default": true },
+          "bit_depth": { "type": "string", "enum": ["float32", "float64"], "default": "float32" }
+        },
+        "required": ["audio_id"]
+      }
+    },
+    {
+      "name": "job_status",
+      "description": "Poll until done/error. Poll interval 3-5 seconds; do not spam.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "job_id": { "type": "string" } },
+        "required": ["job_id"]
+      }
+    },
+    {
+      "name": "job_result",
+      "description": "Fetch mastered audio + metadata once job_status == done.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "job_id": { "type": "string" } },
+        "required": ["job_id"]
+      }
+    },
+    {
+      "name": "read_artifact",
+      "description": "Read artifact bytes in base64 chunks.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "artifact_id": { "type": "string" },
+          "offset": { "type": "integer", "default": 0 },
+          "length": { "type": "integer", "default": 2097152 }
+        },
+        "required": ["artifact_id"]
+      }
+    },
+    {
+      "name": "master_audio",
+      "description": "Run a synchronous single-pass master.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "audio_id": { "type": "string" },
+          "preset_name": { "type": "string", "default": "hi_fi_streaming" },
+          "target_lufs": { "type": "number", "default": -12.0 },
+          "warmth": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.5 },
+          "transient_boost_db": { "type": "number", "minimum": 0, "maximum": 4, "default": 1.0 },
+          "enable_harshness_limiter": { "type": "boolean", "default": true },
+          "enable_air_motion": { "type": "boolean", "default": true },
+          "bit_depth": { "type": "string", "enum": ["float32", "float64"], "default": "float32" }
+        },
+        "required": ["audio_id"]
+      }
+    },
+    {
+      "name": "master_closed_loop",
+      "description": "Run a deterministic 2-pass auto master.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "audio_id": { "type": "string" },
+          "goal": { "type": "string" },
+          "platform": { "type": "string", "enum": ["spotify", "apple_music", "youtube", "soundcloud", "club"] }
+        },
+        "required": ["audio_id", "goal"]
+      }
+    },
+    {
+      "name": "safe_read_text",
+      "description": "Read a text file within the server allowlist.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "path": { "type": "string" } },
+        "required": ["path"]
+      }
+    },
+    {
+      "name": "safe_write_text",
+      "description": "Write a text file within the server allowlist.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" },
+          "content": { "type": "string" }
+        },
+        "required": ["path", "content"]
+      }
+    }
+  ]
+}
