@@ -27,6 +27,10 @@ What's new vs earlier generations
 7) Runtime Optimizations:
    - Batched vectorized FFT magnitude analysis (fewer Python loops).
    - Cached DSP coefficients + LUFS baseline reuse inside governor search.
+
+Quick CLI Example
+-----------------
+python tools/auralmind_maestro.py --target input.wav --out mastered.wav --preset hi_fi_streaming
 """
 
 import os
@@ -34,7 +38,6 @@ import json
 import math
 import time
 import logging
-import scipy
 import argparse
 import numpy as np
 import soundfile as sf
@@ -53,10 +56,6 @@ try:
     HAS_DEMUCS = True
 except ImportError:
     HAS_DEMUCS = False
-
-sci = scipy.ndimage
-
-
 
 # ---------------------------
 # Utility helpers
@@ -510,7 +509,7 @@ def true_peak_limiter(y: np.ndarray, sr: int, ceiling_dbfs: float = -1.0,
     # max(|L|,|R|)
     inst = np.max(np.abs(y), axis=1).astype(np.float32)
     # moving max (fast)
-    env = sci.maximum_filter1d(inst, size=win, mode="nearest")
+    env = maximum_filter1d(inst, size=win, mode="nearest")
     # gain to keep env under ceiling
     gains = np.minimum(1.0, ceiling / np.maximum(env, 1e-9)).astype(np.float32)
     gains = limiter_smooth_gain(gains, sr, attack_ms, release_ms).astype(np.float32)
@@ -2962,65 +2961,64 @@ def _default_report_path(out_path: str) -> str:
         return "report.md"
     return f"{base}.md"
 
-def main():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s  %(name)s  %(levelname)s  %(message)s",
-        datefmt="%H:%M:%S",
-    )
-    args = build_arg_parser().parse_args()
-    if args.report is None:
-        args.report = _default_report_path(args.out)
-    presets = get_presets()
-    preset = presets[args.preset]
 
-    # Auto-tune (expert): pick preset + safe loudness/GR constraints from audio features
+def _auto_tune_preset_if_requested(
+    args: argparse.Namespace,
+    presets: Dict[str, "Preset"],
+    preset: "Preset",
+) -> Tuple["Preset", Dict[str, Any]]:
     auto_info: Dict[str, Any] = {"enabled": False}
-    if args.auto:
-        y_t, sr_t = load_audio(args.target)
-        tf = analyze_track_features(y_t, sr_t)
-        rf = None
-        if args.reference:
-            y_r, sr_r = load_audio(args.reference)
-            rf = analyze_track_features(y_r, sr_r)
-        name = auto_select_preset_name(tf)
-        preset = presets.get(name, preset)
-        preset, auto_info = auto_tune_preset(preset, tf, rf)
+    if not args.auto:
+        return preset, auto_info
 
+    y_t, sr_t = load_audio(args.target)
+    target_features = analyze_track_features(y_t, sr_t)
+
+    reference_features = None
+    if args.reference:
+        y_r, sr_r = load_audio(args.reference)
+        reference_features = analyze_track_features(y_r, sr_r)
+
+    auto_name = auto_select_preset_name(target_features)
+    auto_preset = presets.get(auto_name, preset)
+    auto_preset, auto_info = auto_tune_preset(auto_preset, target_features, reference_features)
+    return auto_preset, auto_info
+
+
+def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
     updates: Dict[str, Any] = {}
 
-    # Stem separation overrides
+    # Stem separation overrides.
     if args.no_stems:
-        updates['enable_stem_separation'] = False
+        updates["enable_stem_separation"] = False
     if args.stems:
-        updates['enable_stem_separation'] = True
+        updates["enable_stem_separation"] = True
     if args.demucs_model is not None:
-        updates['demucs_model'] = args.demucs_model
+        updates["demucs_model"] = args.demucs_model
     if args.demucs_device is not None:
-        updates['demucs_device'] = args.demucs_device
+        updates["demucs_device"] = args.demucs_device
     if args.demucs_overlap is not None:
-        updates['demucs_overlap'] = float(args.demucs_overlap)
+        updates["demucs_overlap"] = float(args.demucs_overlap)
     if args.demucs_no_split:
-        updates['demucs_split'] = False
+        updates["demucs_split"] = False
     if args.demucs_shifts is not None:
-        updates['demucs_shifts'] = int(args.demucs_shifts)
+        updates["demucs_shifts"] = int(args.demucs_shifts)
 
-    # Movement overrides
+    # Movement + HookLift.
     if args.no_movement:
-        updates['enable_movement'] = False
+        updates["enable_movement"] = False
     if args.movement_amount is not None:
-        updates['movement_amount'] = float(args.movement_amount)
-
-    # HookLift overrides
+        updates["movement_amount"] = float(args.movement_amount)
     if args.no_hooklift:
-        updates['enable_hooklift'] = False
+        updates["enable_hooklift"] = False
     if args.hooklift_mix is not None:
-        updates['hooklift_mix'] = float(args.hooklift_mix)
+        updates["hooklift_mix"] = float(args.hooklift_mix)
     if args.hooklift_no_auto:
-        updates['hooklift_auto'] = False
+        updates["hooklift_auto"] = False
     if args.hooklift_percentile is not None:
-        updates['hooklift_auto_percentile'] = float(args.hooklift_percentile)
+        updates["hooklift_auto_percentile"] = float(args.hooklift_percentile)
 
+    # Core tonal + dynamic controls.
     if args.mono_sub:
         updates["enable_mono_sub_v2"] = True
     if args.no_mono_sub:
@@ -3029,7 +3027,6 @@ def main():
         updates["enable_masking_eq"] = True
     if args.no_masking_eq:
         updates["enable_masking_eq"] = False
-    # Expert overrides
     if args.target_lufs is not None:
         updates["target_lufs"] = float(args.target_lufs)
     if args.ceiling is not None:
@@ -3049,7 +3046,6 @@ def main():
         updates["enable_microdetail"] = True
     if args.no_microdetail:
         updates["enable_microdetail"] = False
-
     if args.transient_boost is not None:
         updates["transient_sculpt_boost_db"] = float(args.transient_boost)
     if args.transient_mix is not None:
@@ -3058,9 +3054,29 @@ def main():
         updates["transient_sculpt_crest_guard_db"] = float(args.transient_guard)
     if args.transient_decay is not None:
         updates["transient_sculpt_decay_ms"] = float(args.transient_decay)
-
     if args.warmth is not None:
         updates["warmth"] = float(args.warmth)
+
+    return updates
+
+
+def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(name)s  %(levelname)s  %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    args = build_arg_parser().parse_args()
+    if args.report is None:
+        args.report = _default_report_path(args.out)
+    presets = get_presets()
+    preset = presets[args.preset]
+
+    # Auto mode selects a safer starting preset from measured program material.
+    preset, _auto_info = _auto_tune_preset_if_requested(args, presets, preset)
+
+    # Collect all explicit CLI overrides in one place before applying them.
+    updates = _collect_cli_overrides(args)
 
     if updates:
         preset = replace(preset, **updates)

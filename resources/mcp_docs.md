@@ -1,153 +1,130 @@
 # AuralMind Maestro MCP - LLM Guide
 
-This server exposes a non-blocking mastering workflow. Use the tools in order and
-reuse returned handles instead of filesystem paths.
+This server runs over `stdio` and exposes mastering workflows through MCP tools.
+Use server-issued handles (`aud_*`, `job_*`, `art_*`) for all follow-up calls.
 
-## Quick Flow (Recommended)
+## Recommended Flow
 
-1) `upload_audio_to_session`
-2) `analyze_audio`
-3) Optional: `generate-mastering-strategy`
-4) `propose_master_settings`
-5) `run_master_job`
-6) Poll `job_status`
-7) `job_result`
-8) `read_artifact` (audio/JSON download)
+1. `get_connect_packet` (or read `auralmind://connect-kit`)
+2. `list_data_audio`
+3. `register_audio_from_path`
+4. `analyze_audio`
+5. Optional: `generate-mastering-strategy`
+6. `propose_master_settings`
+7. `run_master_job`
+8. Poll `job_status`
+9. `job_result`
+10. `read_artifact`
 
-Optional: `master_closed_loop` for a 2-pass auto master.
+Optional: `master_closed_loop` for deterministic 2-pass mastering.
+
+## End-to-End Example
+
+```json
+{
+  "name": "register_audio_from_path",
+  "arguments": { "path": "song.wav" }
+}
+```
+
+```json
+{
+  "name": "analyze_audio",
+  "arguments": { "audio_id": "aud_1234567890ab" }
+}
+```
+
+```json
+{
+  "name": "run_master_job",
+  "arguments": {
+    "audio_id": "aud_1234567890ab",
+    "preset_name": "hi_fi_streaming",
+    "target_lufs": -12.0,
+    "warmth": 0.5,
+    "transient_boost_db": 1.0,
+    "enable_harshness_limiter": true,
+    "enable_air_motion": true,
+    "bit_depth": "float32"
+  }
+}
+```
+
+```json
+{
+  "name": "job_status",
+  "arguments": { "job_id": "job_1234567890ab" }
+}
+```
+
+```json
+{
+  "name": "job_result",
+  "arguments": { "job_id": "job_1234567890ab" }
+}
+```
+
+## Resumable Upload Mini-Example
+
+Use this if `data/` has no source file.
+
+```json
+{
+  "name": "upload_init",
+  "arguments": {
+    "filename": "song.wav",
+    "total_bytes": 12345678,
+    "sha256": "<optional-sha256>"
+  }
+}
+```
+
+```json
+{
+  "name": "upload_chunk",
+  "arguments": {
+    "upload_id": "upl_1234567890ab",
+    "index": 0,
+    "chunk_b64": "<base64-chunk>"
+  }
+}
+```
+
+```json
+{
+  "name": "upload_finalize",
+  "arguments": {
+    "upload_id": "upl_1234567890ab"
+  }
+}
+```
+
+## Legacy Upload Note
+
+`upload_audio_to_session` remains available for older clients.
+For new clients, prefer `upload_init/upload_chunk/upload_finalize`.
 
 ## Resources
 
-- `config://system-prompt` - cognitive mastering instructions (markdown).
-- `config://mcp-docs` - this document (markdown).
-- `config://server-info` - server limits and supported bit depth (JSON).
-- `auralmind://workflow` - ordered mastering workflow (JSON).
-- `auralmind://metrics` - scoring thresholds (JSON).
-- `auralmind://presets` - preset atlas (JSON).
-- `auralmind://contracts` - tool I/O contracts (JSON).
+- `config://system-prompt`: cognitive mastering instructions.
+- `config://mcp-docs`: this guide.
+- `config://server-info`: limits, transport, and supported bit depth.
+- `auralmind://connect-kit`: first-contact packet with examples.
+- `auralmind://workflow`: ordered call sequence.
+- `auralmind://metrics`: scoring thresholds.
+- `auralmind://presets`: preset atlas.
+- `auralmind://contracts`: tool I/O schemas.
 
 ## Prompt
 
 `generate-mastering-strategy(integrated_lufs, crest_db, platform)`
 
-Parameters:
-    - `integrated_lufs` (float): integrated loudness (LUFS)
-    - `crest_db` (float): crest factor (dB)
-    - `platform` (spotify | apple_music | youtube | soundcloud | club)
+Map output settings to `propose_master_settings` / `run_master_job` inputs:
 
-Returns a prompt that embeds the system prompt plus the provided metrics.
-
-## Tools
-
-### upload_audio_to_session
-
-Parameters:
-    - `filename` (str)
-    - `payload_b64` (str, preferred) OR `hex_payload` (str, legacy)
-
-Notes:
-
-- Max payload is 400 MB after decode.
-
-Returns:
-    - `audio_id` plus metadata (`filename`, `size_bytes`, `sha256`, `media_type`)
-
-### analyze_audio
-
-Parameters:
-    - `audio_id` (aud_... or art_...)
-
-Returns metrics:
-
-- `integrated_lufs`, `true_peak_dbtp`, `crest_db`, `stereo_correlation`, `duration_s`
-- `peak_dbfs`, `rms_dbfs`, `centroid_hz`
-
-### list_presets
-
-Returns a `presets` map of preset names to key tuning values:
-
-- `target_lufs`, `ceiling_dbfs`, `limiter_mode`, `governor_gr_limit_db`
-- `match_strength`, `enable_harshness_limiter`, `enable_air_motion`, `bit_depth`
-
-### propose_master_settings
-
-Validates and clamps settings before job submission.
-
-Parameters:
-    - `preset_name`
-    - `target_lufs`
-    - `warmth` (0.0 to 1.0)
-    - `transient_boost_db` (0.0 to 4.0)
-    - `enable_harshness_limiter`
-    - `enable_air_motion`
-    - `bit_depth` (`float32` | `float64`)
-
-Returns:
-    - `settings` (safe, clamped values)
-
-### run_master_job
-
-Same parameters as `propose_master_settings`, plus:
-    - `audio_id`
-
-Returns:
-    - `job_id`, `status`, `audio_id`
-
-### job_status
-
-Parameters:
-    - `job_id`
-
-Returns:
-    - `job_id`, `status`, `progress`, `elapsed_s`, `error` (optional)
-
-### job_result
-
-Parameters:
-    - `job_id`
-
-Returns:
-    - `job_id`, `status`
-    - `artifacts` (audio + JSON summaries)
-    - `metrics` (final loudness and analysis metrics)
-    - `precision`
-
-### master_audio
-
-Runs a synchronous, single-pass master (same inputs as `run_master_job`).
-
-Returns:
-    - `master_wav_id`, `metrics_before`, `metrics_after`, `tuning_trace_id`, `artifacts`
-
-### master_closed_loop
-
-Runs a 2-pass auto master for a goal/platform. Uses the original input for each pass.
-
-Returns:
-    - `best_run_id`, `artifacts`, `runner_summary_id`, `metrics_final`
-
-### read_artifact
-
-Parameters:
-    - `artifact_id`
-    - `offset` (optional, default 0)
-    - `length` (optional, default 2 MB, max 2 MB)
-
-Returns:
-    - `data_b64` plus artifact metadata (`filename`, `media_type`, `size_bytes`, `sha256`)
-    - `offset`, `length`, `is_last`
-
-### safe_read_text / safe_write_text
-
-Read/write text files within the server allowlist (session storage and `data/`).
-
-## Strategy-to-Settings Mapping
-
-If you call `generate-mastering-strategy`, map its JSON fields to tool inputs:
-    - `preset_name` -> `preset_name`
-    - `target_lufs` -> `target_lufs`
-    - `warmth` -> `warmth`
-    - `transient_boost_db` -> `transient_boost_db`
-    - `enable_harshness_limiter` -> `enable_harshness_limiter`
-    - `enable_air_motion` -> `enable_air_motion`
-    - `bit_depth` -> `bit_depth`
+- `preset_name`
+- `target_lufs`
+- `warmth`
+- `transient_boost_db`
+- `enable_harshness_limiter`
+- `enable_air_motion`
+- `bit_depth`

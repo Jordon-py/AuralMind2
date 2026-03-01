@@ -10,103 +10,121 @@ from pathlib import Path
 
 
 
-def get_files() -> list[str]:
+import shutil
+
+def get_files() -> list[dict]:
     """
     Returns a list of files to process.
+    Looks in the data folder relative to the script location.
     """
-    files = glob.glob(os.path.join(os.path.dirname(__file__), "data", "*"))
+    data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+    files = glob.glob(os.path.join(data_dir, "*"))
     num_files = []
 
-    try:
-        for k, file in enumerate(files):
+    for k, file in enumerate(files):
+        # Skip directories and non-audio files
+        if os.path.isfile(file) and file.lower().endswith(('.wav', '.mp3', '.m4a')):
             num_files.append({"number": k, "file": file})
-
-    except ValueError:
-        print("File name must be in the format 'file_1.wav'")
-        exit(1)
 
     return num_files
 
 
-def run_script(task: dict) -> list[str]:
+def run_script(task: dict) -> tuple[str, int, str]:
     """
     Runs ONE python file as a separate process with args.
-    Returns (script_path, exit_code).
+    Returns (script_path, exit_code, original_target).
     """
     script = Path(task["script"]).resolve()
-    # sys.executable ensures we use the same Python that ran THIS runner script
+    target = task.get("target_original", "")
     cmd = [sys.executable, str(script)] + task.get("args", [])
-    completed = subprocess.run(cmd)  # waits for this one script to finish
-    return str(script), completed.returncode
+    print(f"Running: {' '.join(cmd)}")
+    completed = subprocess.run(cmd)
+    return str(script), completed.returncode, target
+
+
+def update_arg(args: list[str], flag: str, value: str) -> None:
+    """
+    Updates or appends a flag/value pair in the args list.
+    """
+    try:
+        idx = args.index(flag)
+        if idx + 1 < len(args):
+            args[idx + 1] = value
+        else:
+            args.append(value)
+    except ValueError:
+        args.extend([flag, value])
 
 
 def main() -> None:
-    scripts = [
-        {"script": r"C:\\Users\\goku\\Documents\\Projects\\mcp_mind\\AuralMind\\auralmind_match_maestro_v7_3.py", "args": [
-            "--target", "C:\\Users\\goku\\Downloads\\Vegas - top teir (21).wav",
-            "--out", "C:\\Users\\goku\\Downloads\\Vegas - top teir (21) god_3d.wav",
-            "--report", "C:\\Users\\goku\\Downloads\\Vegas - top teir (21) MASTER_trap_god_3d_Report.md",
-            "--preset", "hi_fi_streaming",
-            "--mono-sub",
-            "--target-lufs", "-13.0",
-            "--ceiling", "-1.2",
-            "--limiter", "v2",
-            "--fir-stream", "auto",
-            "--microdetail",
-            "--movement-amount", "0.23",
-            "--hooklift-mix", "0.46",
-            "--hooklift-percentile", "88",
-            "--transient-boost", "2.2",
-            "--transient-mix", "0.42",
-            "--transient-guard", "23.0",
-            "--transient-decay", "6.7",
-            "--stems",
-            "--masking-eq"]
-            },
-
-        {"script": r"C:\\Users\\goku\\Documents\\Projects\\mcp_mind\\AuralMind\\auralmind_match_maestro_v7_3.py", "args": [
-            "--target", "C:\\Users\\goku\\Downloads\\Vegas - top teir (22).wav",
-            "--out", "C:\\Users\\goku\\Downloads\\Vegas - top teir (22) god_3d.wav",
-            "--report", "C:\\Users\\goku\\Downloads\\Vegas - top teir (22) MASTER_trap_god_3d_Report.md",
-            "--preset", "hi_fi_streaming",
-            "--mono-sub",
-            "--target-lufs", "-13.0",
-            "--ceiling", "-1.2",
-            "--limiter", "v2",
-            "--fir-stream", "auto",
-            "--microdetail",
-            "--movement-amount", "0.21",
-            "--hooklift-mix", "0.46",
-            "--hooklift-percentile", "88",
-            "--transient-boost", "2.2",
-            "--transient-mix", "0.42",
-            "--transient-guard", "21.0",
-            "--transient-decay", "6.7",
-            "--masking-eq"]
-            },
+    template_scripts = [
+        {
+            "script": r"C:\Users\goku\Documents\Projects\mcp_mind\AuralMind\auralmind_match_maestro_v7_3.py",
+            "args": [
+                "--preset", "club_clean",
+                "--mono-sub",
+                "--target-lufs", "-13.0",
+                "--ceiling", "-1.2",
+                "--limiter", "v2",
+                "--fir-stream", "auto",
+                "--microdetail",
+                "--movement-amount", "0.22",
+                "--hooklift-mix", "0.44",
+                "--hooklift-percentile", "88",
+                "--transient-boost", "2.0",
+                "--transient-mix", "0.40",
+                "--transient-guard", "24.0",
+                "--transient-decay", "6.5",
+                "--masking-eq"
+            ]
+        }
     ]
 
-    num_files = get_files()
-    max_workers = 2  # how many scripts to run at the same time
+    all_files = get_files()
+    max_files = 30  # BATCH SIZE
+    num_files = all_files[:max_files]
+
+    max_workers = 2
     song_list = []
 
+    data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+    complete_dir = os.path.join(data_dir, "complete")
+    os.makedirs(complete_dir, exist_ok=True)
 
-    for k, file in enumerate(num_files):
-       scripts[0]["args"]["target"] = file["file"]
-       scripts[0]["args"]["out"] = "C:\\Users\\goku\\Downloads\\" + str(k) + "_god_3d.wav"
-       scripts[0]["args"]["report"] = "C:\\Users\\goku\\Downloads\\" + str(k) + "_god_3d_Report.md"
-       scripts[1]["args"]["target"] = file["file"]
-       scripts[1]["args"]["out"] = "C:\\Users\\goku\\Downloads\\" + str(k) + "_god_3d.wav"
-       scripts[1]["args"]["report"] = "C:\\Users\\goku\\Downloads\\" + str(k) + "_god_3d_Report.md"
-       song_list.append(scripts)
+    for item in num_files:
+        k = item["number"]
+        file_path = item["file"]
 
+        # Create a deep-ish copy of the task
+        task = {
+            "script": template_scripts[0]["script"],
+            "args": list(template_scripts[0]["args"]),
+            "target_original": file_path
+        }
+
+        # Update specific args
+        update_arg(task["args"], "--target", file_path)
+        update_arg(task["args"], "--out", f"C:\\Users\\goku\\Downloads\\{k}_god_3d.wav")
+        update_arg(task["args"], "--report", f"C:\\Users\\goku\\Downloads\\{k}_god_3d_Report.md")
+
+        song_list.append(task)
+
+    print(f"Orchestrating {len(song_list)} tasks...")
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = [pool.submit(run_script, s) for s in song_list]
 
         for fut in as_completed(futures):
-            script, code = fut.result()
-            print(f"{script} -> exit code {code}")
+            script, code, target = fut.result()
+            print(f"{script} -> exit code {code} for {target}")
+
+            if code == 0 and target:
+                dest = os.path.join(complete_dir, os.path.basename(target))
+                print(f"Moving {target} to {dest}")
+                try:
+                    shutil.move(target, dest)
+                except Exception as e:
+                    print(f"Error moving file: {e}")
 
 
 if __name__ == "__main__":

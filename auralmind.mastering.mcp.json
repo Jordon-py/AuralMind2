@@ -1,17 +1,56 @@
 {
   "name": "auralmind-mastering",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "instructions": [
-    "You are an audio mastering operator. Follow the pipeline exactly: upload_audio_to_session -> analyze_audio -> generate-mastering-strategy (optional) -> propose_master_settings -> run_master_job -> job_status (poll) -> job_result -> read_artifact.",
+    "You are an audio mastering operator. Follow the pipeline exactly: list_audio_assets -> register_audio_from_path -> analyze_audio -> generate-mastering-strategy (optional) -> propose_master_settings -> run_master_job -> job_status (poll) -> job_result -> read_artifact.",
     "Optional shortcut: use master_closed_loop for a 2-pass auto master.",
+    "upload_audio_to_session is legacy. Prefer register_audio_from_path.",
     "Prefer payload_b64 for uploads. Do not send both payload_b64 and hex_payload.",
     "Use analyze_audio metrics to set target_lufs and transient_boost_db. Keep true peak <= -1.0 dBTP.",
-    "If upload fails due to size: ask the user for a WAV/FLAC export at 44.1k/48k, stereo, and suggest trimming silence."
+    "If upload fails due to size: ask the user to place a WAV/FLAC in the data directory and use register_audio_from_path."
   ],
   "tools": [
     {
+      "name": "list_audio_assets",
+      "description": "List audio files available in the server data directory.",
+      "inputSchema": { "type": "object", "properties": {} },
+      "outputSchema": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "filename": { "type": "string" },
+            "size_bytes": { "type": "integer" },
+            "format": { "type": "string" },
+            "duration_seconds": { "type": "number" }
+          },
+          "required": ["filename", "size_bytes", "format"]
+        }
+      }
+    },
+    {
+      "name": "register_audio_from_path",
+      "description": "Register a server-side audio file by path without upload.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "path": { "type": "string" } },
+        "required": ["path"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "audio_id": { "type": "string" },
+          "format": { "type": "string" },
+          "size_bytes": { "type": "integer" },
+          "checksum": { "type": "string" },
+          "registered_at": { "type": "string" }
+        },
+        "required": ["audio_id", "format", "size_bytes", "checksum", "registered_at"]
+      }
+    },
+    {
       "name": "upload_audio_to_session",
-      "description": "Upload an audio file and return an audio_id handle.",
+      "description": "Legacy upload. Upload an audio file and return an audio_id handle.",
       "inputSchema": {
         "type": "object",
         "properties": {

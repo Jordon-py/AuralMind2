@@ -1,348 +1,228 @@
 # AuralMind Maestro - MCP Mastering Server
 
-Production-grade AI mastering pipeline exposed as MCP tools. The server wraps
-the DSP engine in `tools/auralmind_maestro.py` and provides a non-blocking
-mastering workflow for LLM clients.
+AuralMind Maestro is a FastMCP server that exposes an audio mastering pipeline as MCP tools.
+It is designed for `transport="stdio"` and returns stable handles (`aud_*`, `job_*`, `art_*`) instead of raw file paths.
 
-## Highlights
+## What This Server Does
 
-- 48 kHz mastering pipeline with float32/float64 export options.
-- Async job execution via background thread pool.
-- LLM-first control loop: upload -> analyze -> propose -> run -> poll -> result -> read.
-- Handle-based I/O (audio_id/artifact_id) with chunked artifact reads.
-- Optional Demucs stem separation when `torch` + `demucs` are available.
+- Registers audio from the server-side `data/` folder or resumable upload.
+- Analyzes loudness/crest/stereo metrics.
+- Runs mastering asynchronously in background jobs.
+- Returns mastered audio and JSON artifacts via chunked reads.
 
-## Architecture
+## Architecture (Stdio)
 
-```
-LLM client -> FastMCP (stdio / http)
-   resources: config://system-prompt, config://mcp-docs, config://server-info
-              auralmind://workflow, auralmind://metrics, auralmind://presets
-              auralmind://contracts
-   prompts:   generate-mastering-strategy, master_once, master_closed_loop_prompt
-   tools:     upload_audio_to_session
-              analyze_audio
-              list_presets
-              propose_master_settings
-              run_master_job
-              job_status
-              job_result
-              master_audio
-              master_closed_loop
-              read_artifact
-              safe_read_text
-              safe_write_text
-   DSP engine: tools/auralmind_maestro.py
+```text
+LLM/Client -> FastMCP (stdio)
+            -> resources
+            -> prompts
+            -> tools
+            -> tools/auralmind_maestro.py (DSP engine)
 ```
 
 ## Requirements
 
-- Python >= 3.12
-- numpy, scipy, soundfile
-- fastmcp (server runtime)
-- Optional: torch + demucs for stem separation
+- Python 3.12+
+- Dependencies in `requirements.txt`
 
-## Install
+Install:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Or with uv:
+Or:
 
 ```bash
 uv pip install -r requirements.txt
 ```
 
-## Run the MCP server
+## Run
 
 ```bash
-python server.py
+python3 server.py
 ```
 
-Or with uv:
+Or:
 
 ```bash
 uv run server.py
 ```
 
-The server writes session files into `MAESTRO_SESSION_DIR` (default: OS temp
-`maestro_sessions/`) and returns stable handles instead of filesystem paths.
+If using FastMCP CLI, use `stdio` explicitly:
 
-For request/response examples, see `MCP.md`.
-
-## MCP primitives (tools, resources, prompts)
-
-Resources are read-only data (docs, presets, limits). Use them to load guidance
-or static metadata.
-
-```json
-{
-  "method": "resources/read",
-  "params": { "uri": "auralmind://workflow" }
-}
+```bash
+fastmcp run server.py --transport stdio
 ```
 
-Prompts are reusable templates. Use them to generate a consistent mastering
-strategy from metrics.
+Or use the included `fastmcp.json` (defaults to `stdio`):
+
+```bash
+fastmcp run
+```
+
+`fastmcp run server.py` without `--transport stdio` defaults to Streamable HTTP, which starts Uvicorn on `127.0.0.1:8000`.
+
+## Happy Path (Recommended)
+
+1. `get_connect_packet` (or read `auralmind://connect-kit`)
+2. `list_data_audio`
+3. `register_audio_from_path`
+4. `analyze_audio`
+5. `propose_master_settings`
+6. `run_master_job`
+7. Poll `job_status`
+8. `job_result`
+9. `read_artifact`
+
+## Example: Register Then Analyze
+
+Request (`tools/call`):
 
 ```json
 {
-  "method": "prompts/render",
-  "params": {
-    "name": "generate-mastering-strategy",
-    "arguments": {
-      "integrated_lufs": -13.1,
-      "crest_db": 9.2,
-      "platform": "spotify"
-    }
+  "name": "register_audio_from_path",
+  "arguments": {
+    "path": "song.wav"
   }
 }
 ```
 
-Tools are executable actions. Use them to upload, analyze, master, and download
-artifacts.
+Response (shape):
 
 ```json
 {
-  "method": "tools/call",
-  "params": {
-    "name": "run_master_job",
-    "arguments": {
-      "audio_id": "aud_1234567890ab",
-      "preset_name": "hi_fi_streaming",
-      "target_lufs": -12.5
-    }
+  "audio_id": "aud_1234567890ab",
+  "format": "wav",
+  "size_bytes": 12345678,
+  "checksum": "...sha256...",
+  "registered_at": "2026-03-01T00:00:00Z"
+}
+```
+
+Request (`tools/call`):
+
+```json
+{
+  "name": "analyze_audio",
+  "arguments": {
+    "audio_id": "aud_1234567890ab"
   }
 }
 ```
 
-## MCP resources and prompts
+Response includes:
 
-### Resource: `config://system-prompt`
+- `integrated_lufs`
+- `true_peak_dbtp`
+- `crest_db`
+- `stereo_correlation`
+- `duration_s`
+- `peak_dbfs`, `rms_dbfs`, `centroid_hz`
 
-Returns the cognitive mastering system prompt from `resources/system_prompt.md`.
+## Example: Async Mastering Flow
 
-### Resource: `config://mcp-docs`
+Start job:
 
-Returns the LLM-facing MCP usage guide from `resources/mcp_docs.md`.
-
-### Resource: `config://server-info`
-
-Returns server limits and supported bit depth as JSON.
-
-### Resource: `auralmind://workflow`
-
-Returns the ordered mastering flow (JSON).
-
-### Resource: `auralmind://metrics`
-
-Returns scoring thresholds (JSON).
-
-### Resource: `auralmind://presets`
-
-Returns detailed preset metadata (JSON).
-
-### Resource: `auralmind://contracts`
-
-Returns tool I/O contracts (JSON schema summary).
-
-### Prompt: `generate-mastering-strategy`
-
-Signature:
-
-```
-generate-mastering-strategy(integrated_lufs: float, crest_db: float, platform: str)
+```json
+{
+  "name": "run_master_job",
+  "arguments": {
+    "audio_id": "aud_1234567890ab",
+    "preset_name": "hi_fi_streaming",
+    "target_lufs": -12.0,
+    "warmth": 0.5,
+    "transient_boost_db": 1.0,
+    "enable_harshness_limiter": true,
+    "enable_air_motion": true,
+    "bit_depth": "float32"
+  }
+}
 ```
 
-Returns a prompt that embeds the system prompt plus the provided metrics.
+Poll status:
 
-## Tools
+```json
+{
+  "name": "job_status",
+  "arguments": {
+    "job_id": "job_1234567890ab"
+  }
+}
+```
 
-### `upload_audio_to_session`
+Fetch result when `status == "done"`:
 
-Upload audio to the server and return an `audio_id`.
+```json
+{
+  "name": "job_result",
+  "arguments": {
+    "job_id": "job_1234567890ab"
+  }
+}
+```
 
-Parameters:
+Read output bytes in chunks:
 
-- `filename` (str): original filename (used for display).
-- `payload_b64` (str, preferred): audio file encoded as base64.
-- `hex_payload` (str, legacy): audio file encoded as hex.
+```json
+{
+  "name": "read_artifact",
+  "arguments": {
+    "artifact_id": "art_1234567890ab",
+    "offset": 0,
+    "length": 2097152
+  }
+}
+```
 
-Notes:
+## Empty `data/` Flow (Upload Path)
 
-- Max payload is 400 MB after decode.
+If no song exists in `data/`, use resumable upload:
 
-### `analyze_audio`
+1. `upload_init`
+2. `upload_chunk` (ordered, 0..N)
+3. `upload_finalize`
+4. Use returned `audio_id` with `analyze_audio` and `run_master_job`
 
-Run pre-mastering analysis on the uploaded file.
+`upload_audio_to_session` is still available for legacy clients, but resumable upload is preferred.
 
-Parameters:
+## Resources
 
-- `audio_id` (str): from `upload_audio_to_session` or a mastered `art_` handle.
+- `config://system-prompt`
+- `config://mcp-docs`
+- `config://server-info`
+- `auralmind://connect-kit`
+- `auralmind://workflow`
+- `auralmind://metrics`
+- `auralmind://presets`
+- `auralmind://contracts`
 
-Returns:
+## Prompts
 
-- `integrated_lufs`, `true_peak_dbtp`, `crest_db`, `stereo_correlation`
-- `duration_s`, `peak_dbfs`, `rms_dbfs`, `centroid_hz`
+- `on_connect`
+- `master_once`
+- `master_closed_loop_prompt`
+- `generate-mastering-strategy`
 
-### `list_presets`
+## Troubleshooting
 
-Return all available preset names and key parameters.
+- `not_found`:
+  - Verify handle belongs to current session.
+  - Verify file exists in `data/` before calling `register_audio_from_path`.
+- `not_ready` from `job_result`:
+  - Continue polling `job_status` until `done` or `error`.
+- Upload size failures (`payload_too_large`, `chunk_too_large`):
+  - Use resumable upload and obey `upload_chunk_max_bytes` from `config://server-info`.
+- `unsupported_format`:
+  - Use supported extensions (`wav`, `flac`, `ogg`, `aif`, `aiff`, `mp3`).
 
-### `propose_master_settings`
-
-Validate and clamp settings before job submission.
-
-Parameters:
-
-- `preset_name` (str)
-- `target_lufs` (float)
-- `warmth` (float, 0.0 to 1.0)
-- `transient_boost_db` (float, 0.0 to 4.0)
-- `enable_harshness_limiter` (bool)
-- `enable_air_motion` (bool)
-- `bit_depth` (str, float32/float64)
-
-Returns:
-
-- `settings` (safe, clamped values)
-
-### `run_master_job`
-
-Submit a non-blocking mastering job. Returns a `job_id`.
-
-Parameters:
-
-- `audio_id` (str)
-- Same parameter set as `propose_master_settings`
-
-### `job_status`
-
-Poll for job progress.
-
-Returns `job_id`, `status`, `progress`, `elapsed_s`, and optional `error`.
-
-### `job_result`
-
-Fetch output once the job is `done`.
-
-Returns:
-
-- `artifacts` (list of `{artifact_id, filename, media_type, size_bytes, sha256}`)
-- `metrics` (final analysis metrics)
-- `precision` (format string)
-
-### `master_audio`
-
-Run a synchronous mastering pass (same inputs as `run_master_job`).
-
-### `master_closed_loop`
-
-Run a deterministic 2-pass auto master for a goal/platform.
-
-### `read_artifact`
-
-Read artifact bytes in bounded base64 chunks.
-
-Parameters:
-
-- `artifact_id` (str): from `job_result` or `upload_audio_to_session`.
-- `offset` (int, optional): byte offset (default 0).
-- `length` (int, optional): bytes to read (default 2 MB, max 2 MB).
-
-Returns:
-
-- `data_b64` plus artifact metadata (`filename`, `media_type`, `size_bytes`, `sha256`)
-- `offset`, `length`, `is_last`
-
-### `safe_read_text` / `safe_write_text`
-
-Read/write text files inside the server allowlist (session storage and `data/`).
-
-## DSP pipeline (tools/auralmind_maestro.py)
-
-High-level stages:
-
-- Load audio and resample to 48 kHz
-- Feature analysis and preset selection
-- Dynamic masking EQ, de-ess, and harmonic glow
-- Stereo enhancements (spatial realism, CGMS microshift, microdetail recovery)
-- Transient sculpt + movement automation + HookLift
-- Loudness governor, true-peak limiter, and export
-
-## Presets
-
-| Preset | Target LUFS | Use Case |
-| --- | --- | --- |
-| `hi_fi_streaming` | -12.8 | Streaming platforms |
-| `competitive_trap` | -11.0 | Competitive loudness |
-| `club` | -10.4 | Club playback |
-| `club_clean` | -10.4 | Clean club master |
-| `radio_loud` | -11.0 | Radio / broadcast |
-| `cinematic` | -13.5 | Film / cinematic |
-
-## CLI usage (standalone DSP)
-
-`auralmind_match_maestro_v7_3.py` can be used directly:
+## Quick Validation
 
 ```bash
-python auralmind_match_maestro_v7_3.py --target input.wav --out mastered.wav --preset hi_fi_streaming --report report.md
-```
-
-Common flags:
-
-- `--auto` (auto-select preset and safe targets)
-- `--target-lufs` / `--ceiling` (override loudness and ceiling)
-- `--no-limiter` / `--no-softclip`
-- `--no-stems` / `--stems` and Demucs options
-- `--warmth`, `--transient-boost`, `--transient-mix`
-
-## Project structure
-
-```
-AuralMind/
-  server.py
-  auralmind_match_maestro_v7_3.py
-  tools/
-    auralmind_maestro.py
-    test_pipeline.py
-  resources/
-    system_prompt.md
-    mcp_docs.md
-  MCP.md
-  requirements.txt
-  README.md
-```
-
-## Verification
-
-Syntax check:
-
-```bash
-python -m py_compile server.py tools/auralmind_maestro.py
-```
-
-Import and function availability check:
-
-```bash
-python - <<'PY'
-import tools.auralmind_maestro as m
-required = [
-    "load_audio",
-    "analyze_track_features",
-    "auto_select_preset_name",
-    "auto_tune_preset",
-    "dynamic_masking_eq",
-    "microshift_widen_side",
-    "get_presets",
-    "master",
-    "write_audio",
-    "tpdf_dither",
-]
-missing = [name for name in required if not hasattr(m, name)]
-if missing:
-    raise SystemExit(f"Missing functions: {missing}")
-print("Import OK, functions present:", ", ".join(required))
+python3 -m py_compile server.py tools/auralmind_maestro.py
+python3 - <<'PY'
+import server
+import tools.auralmind_maestro
+print(server.capabilities().transport)
 PY
 ```

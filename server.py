@@ -12,13 +12,15 @@ validation tools respond immediately.
 Architecture
 ------------
 
-    LLM client -> FastMCP (stdio / streamable-HTTP)
+    LLM client -> FastMCP (stdio)
                      -> resources/  config://system-prompt, config://mcp-docs
                                     config://server-info, auralmind://workflow
                                     auralmind://metrics, auralmind://presets
                      -> prompts/    generate-mastering-strategy
                      -> tools/
-                          -> upload_audio_to_session   (sync,  ~instant)
+                          -> list_audio_assets         (sync,  instant)
+                          -> register_audio_from_path  (sync,  instant)
+                          -> upload_audio_to_session   (sync,  ~instant, legacy)
                           -> analyze_audio             (sync,  ~2 s)
                           -> list_presets              (sync,  instant)
                           -> propose_master_settings   (sync,  instant)
@@ -32,36 +34,35 @@ Architecture
                           -> safe_write_text           (sync,  allowlist write)
 """
 
-
-
 import os
 import re
 import json
 import time
 import uuid
 import base64
-import asyncio
 import binascii
 import hashlib
 import logging
 import tempfile
 import threading
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Tuple, Literal, Annotated, Callable
 
-from fastmcp import FastMCP, Context
-from fastmcp.prompts import Message, PromptResult
-from pydantic import BaseModel, Field, ConfigDict, model_validator
-from starlette.middleware import Middleware
-from starlette.middleware.cors import CORSMiddleware
+from mcp.server.fastmcp import FastMCP, Context
+from mcp.server.fastmcp.prompts.base import Message
+from pydantic import BaseModel, Field, ConfigDict, RootModel, model_validator
+import soundfile as sf
 
 load_dotenv(".env")
 
 log = logging.getLogger("auralmind.server")
 
-SERVER_NAME = "AuralMind Maestro v7.3 Pro-Agent"
+SERVER_NAME = "AuralMind"
+SERVER_VERSION = "7.3.0-pro"
+ACTIVE_TRANSPORT = "stdio"
 
 Platform = Literal["spotify", "apple_music", "youtube", "soundcloud", "club"]
 # prefer float64 for audio processing and float32 for audio output
@@ -72,29 +73,7 @@ JobStatus = Literal["queued", "running", "done", "error"]
 # FastMCP server instance
 # ---------------------------------------------------------------------------
 mcp = FastMCP(
-    SERVER_NAME,
-    on_duplicate="error",
-    tasks=False
-)
-
-_http_middleware = [
-    Middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-        allow_headers=[
-            "mcp-protocol-version",
-            "mcp-session-id",
-            "Authorization",
-            "Content-Type",
-        ],
-        expose_headers=["mcp-session-id"],
-    )
-]
-
-app = mcp.http_app(
-    path="/mcp",
-    middleware=_http_middleware,
+    name=SERVER_NAME,
     json_response=True,
 )
 
@@ -107,6 +86,7 @@ DEFAULT_STORAGE_DIR = os.path.join(tempfile.gettempdir(), "maestro_sessions")
 STORAGE_DIR = os.path.abspath(os.environ.get("MAESTRO_SESSION_DIR", DEFAULT_STORAGE_DIR))
 os.makedirs(STORAGE_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
+DATA_DIR_REAL = os.path.realpath(DATA_DIR)
 
 SYSTEM_PROMPT_PATH = os.path.join(
     os.path.dirname(__file__), "resources", "system_prompt.md"
@@ -121,11 +101,17 @@ MCP_DOCS_PATH = os.path.join(
 MAX_UPLOAD_BYTES = 400 * 1024 * 1024  # 400 MB after decode
 MAX_UPLOAD_B64_CHARS = int(MAX_UPLOAD_BYTES * 4 / 3) + 4
 MAX_UPLOAD_HEX_CHARS = MAX_UPLOAD_BYTES * 2
+UPLOAD_CHUNK_MAX_BYTES = int(os.environ.get("UPLOAD_CHUNK_MAX_BYTES", str(1024 * 1024)))  # 1 MiB
+MAX_UPLOAD_CHUNK_B64_CHARS = int(UPLOAD_CHUNK_MAX_BYTES * 4 / 3) + 4
 MAX_READ_BYTES = 2 * 1024 * 1024  # 2 MB chunks for artifact reads
+CONNECT_PREVIEW_LIMIT = 10
+ALLOWED_AUDIO_EXTENSIONS = {".wav", ".flac", ".ogg", ".aif", ".aiff", ".mp3"}
 HANDLE_RE = re.compile(r"^(aud|art|job)_[a-f0-9]{12}$")
+UPLOAD_ID_RE = re.compile(r"^upl_[a-f0-9]{12}$")
 
 _ARTIFACTS_LOCK = threading.Lock()
 _ARTIFACTS: Dict[str, Dict[str, "ArtifactEntry"]] = {}
+_UPLOAD_LOCK = threading.Lock()
 _MAESTRO_LOCK = threading.Lock()
 _MAESTRO: Optional[Any] = None
 _MAESTRO_ERROR: Optional[Dict[str, Any]] = None
@@ -153,7 +139,7 @@ class ErrorEnvelope(StrictBaseModel):
 class CapabilitiesOut(StrictBaseModel):
     server_name: str = Field(..., description="Name of the MCP server.")
     version: str = Field(..., description="Server version.")
-    transport: str = Field(..., description="Active transport (e.g. http).")
+    transport: str = Field(..., description="Active transport (stdio).")
     features: List[str] = Field(..., description="List of enabled features.")
 
 
@@ -344,6 +330,83 @@ class UploadResult(StrictBaseModel):
     media_type: str = Field(..., description="Detected media type.")
 
 
+class UploadInitIn(StrictBaseModel):
+    filename: str = Field(..., description="Original filename.")
+    total_bytes: int = Field(..., ge=1, le=MAX_UPLOAD_BYTES, description="Total decoded byte length.")
+    sha256: Optional[str] = Field(None, description="Expected lowercase SHA-256 hex digest.")
+
+
+class UploadInitOut(StrictBaseModel):
+    upload_id: str = Field(..., description="Upload handle.")
+    filename: str = Field(..., description="Sanitized filename.")
+    total_bytes: int = Field(..., description="Expected total byte count.")
+    received_bytes: int = Field(..., description="Bytes received so far.")
+    next_index: int = Field(..., description="Next chunk index expected.")
+    chunk_max_bytes: int = Field(..., description="Maximum bytes per chunk.")
+    done: bool = Field(..., description="True when upload bytes are complete.")
+
+
+class UploadChunkIn(StrictBaseModel):
+    upload_id: str = Field(..., description="Upload handle from upload_init.")
+    index: int = Field(..., ge=0, description="Sequential chunk index starting at 0.")
+    chunk_b64: str = Field(..., description="Base64 chunk payload.")
+
+
+class UploadFinalizeIn(StrictBaseModel):
+    upload_id: str = Field(..., description="Upload handle from upload_init.")
+
+
+class UploadStatusOut(StrictBaseModel):
+    upload_id: str = Field(..., description="Upload handle.")
+    filename: str = Field(..., description="Sanitized filename.")
+    total_bytes: int = Field(..., description="Expected total byte count.")
+    received_bytes: int = Field(..., description="Bytes received so far.")
+    next_index: int = Field(..., description="Next chunk index expected.")
+    done: bool = Field(..., description="True when upload bytes are complete.")
+    expected_sha256: Optional[str] = Field(None, description="Optional expected digest.")
+
+
+class AudioAssetInfo(StrictBaseModel):
+    filename: str = Field(..., description="Base filename within the data directory.")
+    size_bytes: int = Field(..., description="File size in bytes.")
+    format: str = Field(..., description="Audio format (wav, flac, etc).")
+    duration_seconds: Optional[float] = Field(None, description="Optional duration in seconds.")
+
+
+class AudioAssetList(RootModel[List[AudioAssetInfo]]):
+    pass
+
+
+class ConnectSongPreview(StrictBaseModel):
+    filename: str = Field(..., description="Base filename inside the data directory.")
+    size_bytes: int = Field(..., description="File size in bytes.")
+    format: str = Field(..., description="Audio format extension without dot.")
+    duration_seconds: Optional[float] = Field(None, description="Optional duration in seconds.")
+    modified_at: str = Field(..., description="UTC ISO-8601 last-modified timestamp.")
+
+
+class ConnectPacketOut(StrictBaseModel):
+    generated_at: str = Field(..., description="UTC ISO-8601 packet generation timestamp.")
+    preview_limit: int = Field(..., description="Maximum songs included in preview.")
+    total_songs: int = Field(..., description="Total matching songs in data directory.")
+    songs_preview: List[ConnectSongPreview] = Field(..., description="Most recent songs available to master.")
+    recommended_first_path: str = Field(..., description="Suggested first path based on song availability.")
+    workflow_steps: List[str] = Field(..., description="Ordered first-contact workflow guidance.")
+    example_calls: Dict[str, Any] = Field(..., description="Copy/paste tool call templates.")
+
+
+class RegisterAudioPathIn(StrictBaseModel):
+    path: str = Field(..., description="Path to an audio file within the data directory.")
+
+
+class RegisterAudioResult(StrictBaseModel):
+    audio_id: str = Field(..., description="Server-side handle for the registered audio.")
+    format: str = Field(..., description="Audio format (wav, flac, etc).")
+    size_bytes: int = Field(..., description="File size in bytes.")
+    checksum: str = Field(..., description="SHA-256 checksum of the file.")
+    registered_at: str = Field(..., description="UTC ISO-8601 timestamp of registration.")
+
+
 class ArtifactReadIn(StrictBaseModel):
     artifact_id: str = Field(..., description="Artifact handle.")
     offset: int = Field(0, ge=0, description="Byte offset (default 0).")
@@ -361,6 +424,109 @@ class ArtifactReadResult(StrictBaseModel):
     is_last: bool = Field(..., description="True if this is the final chunk.")
     data_b64: str = Field(..., description="Base64-encoded chunk bytes.")
 
+
+BOOTSTRAP_WORKFLOW_STEPS: List[str] = [
+    "1. get_connect_packet or read auralmind://connect-kit",
+    "2. bootstrap",
+    "3. list_data_audio (or list_audio_assets)",
+    "4. register_audio_from_path",
+    "5. upload_init/upload_chunk/upload_finalize (optional alternative to #4)",
+    "6. analyze_audio",
+    "7. list_presets",
+    "8. propose_master_settings",
+    "9. run_master_job",
+    "10. job_status",
+    "11. job_result",
+    "12. read_artifact",
+    "Optional: master_closed_loop",
+    "Optional: upload_audio_to_session (legacy)",
+]
+
+BOOTSTRAP_EXAMPLE_CALLS: Dict[str, Any] = {
+    "get_connect_packet": {},
+    "list_assets": {},
+    "list_data_audio": {},
+    "register": {"path": "song.wav"},
+    "upload_init": {"filename": "song.wav", "total_bytes": 123456, "sha256": "<sha256>"},
+    "upload_chunk": {"upload_id": "upl_1234567890ab", "index": 0, "chunk_b64": "<base64-chunk>"},
+    "upload_finalize": {"upload_id": "upl_1234567890ab"},
+    "upload_legacy": {"filename": "song.wav", "payload_b64": "<base64>"},
+    "analyze": {"audio_id": "aud_1234567890ab"},
+    "propose": {"preset_name": "hi_fi_streaming", "target_lufs": -12.5},
+    "run_job": {"audio_id": "aud_1234567890ab", "preset_name": "hi_fi_streaming"},
+    "job_status": {"job_id": "job_1234567890ab"},
+    "job_result": {"job_id": "job_1234567890ab"},
+    "closed_loop": {
+        "audio_id": "aud_1234567890ab",
+        "goal": "Streaming-ready, clear and punchy",
+        "platform": "spotify",
+    },
+}
+
+
+def _tool_catalog_entries() -> List[ToolCatalogEntry]:
+    return [
+        ToolCatalogEntry(name="bootstrap", description="Discovery", input_model="Empty", output_model="BootstrapOut"),
+        ToolCatalogEntry(name="get_connect_packet", description="Connect-time song preview and call templates", input_model="Empty", output_model="ConnectPacketOut"),
+        ToolCatalogEntry(name="list_audio_assets", description="List audio assets", input_model="Empty", output_model="AudioAssetList"),
+        ToolCatalogEntry(name="list_data_audio", description="List audio assets (alias)", input_model="Empty", output_model="AudioAssetList"),
+        ToolCatalogEntry(name="register_audio_from_path", description="Register audio from path", input_model="RegisterAudioPathIn", output_model="RegisterAudioResult"),
+        ToolCatalogEntry(name="upload_init", description="Start resumable upload", input_model="UploadInitIn", output_model="UploadInitOut"),
+        ToolCatalogEntry(name="upload_chunk", description="Upload one chunk", input_model="UploadChunkIn", output_model="UploadStatusOut"),
+        ToolCatalogEntry(name="upload_status", description="Get upload status", input_model="upload_id:string", output_model="UploadStatusOut"),
+        ToolCatalogEntry(name="upload_finalize", description="Finalize resumable upload", input_model="UploadFinalizeIn", output_model="UploadResult"),
+        ToolCatalogEntry(name="upload_audio_to_session", description="Upload audio (legacy)", input_model="UploadIn", output_model="UploadResult"),
+        ToolCatalogEntry(name="analyze_audio", description="Analyze", input_model="AnalyzeIn", output_model="AudioMetrics"),
+        ToolCatalogEntry(name="list_presets", description="List presets", input_model="Empty", output_model="PresetsOut"),
+        ToolCatalogEntry(name="propose_master_settings", description="Validate settings", input_model="MasterSettings", output_model="ProposedSettingsOut"),
+        ToolCatalogEntry(name="run_master_job", description="Async mastering job", input_model="MasterRequest", output_model="JobLaunchOut"),
+        ToolCatalogEntry(name="job_status", description="Poll job status", input_model="JobIdIn", output_model="JobStatusOut"),
+        ToolCatalogEntry(name="job_result", description="Fetch job result", input_model="JobIdIn", output_model="JobResultOut"),
+        ToolCatalogEntry(name="master_audio", description="Run master (once)", input_model="MasterRequest", output_model="MasterResult"),
+        ToolCatalogEntry(name="master_closed_loop", description="Expert multi-pass master", input_model="ClosedLoopRequest", output_model="ClosedLoopResult"),
+        ToolCatalogEntry(name="read_artifact", description="Read artifact", input_model="ArtifactReadIn", output_model="ArtifactReadResult"),
+        ToolCatalogEntry(name="safe_read_text", description="Read file", input_model="FileReadIn", output_model="FileReadOut"),
+        ToolCatalogEntry(name="safe_write_text", description="Write file", input_model="FileWriteIn", output_model="FileWriteOut"),
+    ]
+
+
+def _resource_catalog_entries() -> List[ResourceCatalogEntry]:
+    return [
+        ResourceCatalogEntry(uri="config://system-prompt", description="System prompt", mime_type="text/markdown", annotations={"readOnlyHint": True}),
+        ResourceCatalogEntry(uri="config://mcp-docs", description="Usage docs", mime_type="text/markdown", annotations={"readOnlyHint": True}),
+        ResourceCatalogEntry(uri="config://server-info", description="Server limits", mime_type="application/json", annotations={"readOnlyHint": True}),
+        ResourceCatalogEntry(uri="auralmind://connect-kit", description="Connect packet", mime_type="application/json", annotations={"readOnlyHint": True}),
+        ResourceCatalogEntry(uri="auralmind://workflow", description="Workflow steps", mime_type="application/json", annotations={"readOnlyHint": True}),
+        ResourceCatalogEntry(uri="auralmind://metrics", description="Metrics & Scoring", mime_type="application/json", annotations={"readOnlyHint": True}),
+        ResourceCatalogEntry(uri="auralmind://presets", description="Preset Guide", mime_type="application/json", annotations={"readOnlyHint": True}),
+        ResourceCatalogEntry(uri="auralmind://contracts", description="Tool contracts", mime_type="application/json", annotations={"readOnlyHint": True}),
+    ]
+
+
+def _prompt_catalog_entries() -> List[PromptCatalogEntry]:
+    return [
+        PromptCatalogEntry(name="on_connect", description="Client onboarding", args_schema={}),
+        PromptCatalogEntry(name="master_once", description="Single-pass plan", args_schema={"file_uri": "string", "goal": "string", "platform": "string"}),
+        PromptCatalogEntry(name="master_closed_loop_prompt", description="Closure plan", args_schema={"file_uri": "string", "goal": "string", "platform": "string"}),
+        PromptCatalogEntry(name="generate-mastering-strategy", description="Strategy generator", args_schema={"integrated_lufs": "float", "crest_db": "float", "platform": "string"}),
+    ]
+
+
+def _serialize_preset(preset: Any, *, include_extended: bool = False) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "target_lufs": float(preset.target_lufs),
+        "ceiling_dbfs": float(preset.ceiling_dbfs),
+        "limiter_mode": str(getattr(preset, "limiter_mode", "v2")),
+        "governor_gr_limit_db": float(preset.governor_gr_limit_db),
+        "match_strength": float(preset.match_strength),
+        "enable_harshness_limiter": bool(preset.enable_harshness_limiter),
+        "enable_air_motion": bool(getattr(preset, "enable_air_motion", True)),
+        "bit_depth": str(getattr(preset, "bit_depth", "float32")),
+    }
+    if include_extended:
+        payload["warmth"] = float(getattr(preset, "warmth", 0.0))
+        payload["transient_sculpt_boost_db"] = float(getattr(preset, "transient_sculpt_boost_db", 0.0))
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -408,12 +574,153 @@ def _valid_handle(handle: str, prefix: Optional[str] = None) -> bool:
 
 
 def _normalize_path(path: str) -> str:
-    return os.path.normcase(os.path.abspath(path))
+    return os.path.normcase(os.path.realpath(os.path.abspath(path)))
 
 
 def _is_allowed_path(path: str) -> bool:
     norm = _normalize_path(path)
-    return norm.startswith(_normalize_path(STORAGE_DIR)) or norm.startswith(_normalize_path(DATA_DIR))
+    for allowed_root in (_normalize_path(STORAGE_DIR), _normalize_path(DATA_DIR_REAL)):
+        try:
+            if os.path.commonpath([norm, allowed_root]) == allowed_root:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _resolve_data_path(path: str) -> str:
+    if not isinstance(path, str) or not path.strip():
+        raise ValueError("invalid_path")
+    candidate = path.strip()
+    candidate_norm = candidate.replace("\\", "/")
+    if candidate_norm.lower().startswith("./"):
+        candidate_norm = candidate_norm[2:]
+    if candidate_norm.lower().startswith("data/"):
+        candidate_norm = candidate_norm[5:]
+    candidate = candidate_norm
+    if not candidate:
+        raise ValueError("invalid_path")
+    if any(part == ".." for part in re.split(r"[\\/]+", candidate)):
+        raise ValueError("path_traversal")
+    if not os.path.isabs(candidate):
+        candidate = os.path.join(DATA_DIR, candidate)
+    abs_path = os.path.abspath(candidate)
+    real_path = os.path.realpath(abs_path)
+    try:
+        common = os.path.commonpath([os.path.normcase(real_path), os.path.normcase(DATA_DIR_REAL)])
+    except ValueError as exc:
+        raise ValueError("access_denied: Path outside allowlist.") from exc
+    if common != os.path.normcase(DATA_DIR_REAL):
+        raise ValueError("access_denied: Path outside allowlist.")
+    return real_path
+
+
+def _audio_format_from_path(path: str) -> Tuple[str, str]:
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in ALLOWED_AUDIO_EXTENSIONS:
+        raise ValueError("unsupported_format")
+    return ext, ext[1:]
+
+
+def _safe_audio_duration(path: str) -> Optional[float]:
+    try:
+        info = sf.info(path)
+    except Exception:
+        return None
+    duration = getattr(info, "duration", None)
+    if duration is None:
+        return None
+    return round(float(duration), 3)
+
+
+def _iso_utc(ts: float) -> str:
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _scan_connect_previews() -> List[ConnectSongPreview]:
+    indexed: List[Tuple[float, ConnectSongPreview]] = []
+    with os.scandir(DATA_DIR) as entries:
+        for entry in entries:
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            ext = os.path.splitext(entry.name)[1].lower()
+            if ext not in ALLOWED_AUDIO_EXTENSIONS:
+                continue
+            try:
+                st = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            modified = float(st.st_mtime)
+            indexed.append(
+                (
+                    modified,
+                    ConnectSongPreview(
+                        filename=entry.name,
+                        size_bytes=int(st.st_size),
+                        format=ext[1:],
+                        duration_seconds=_safe_audio_duration(entry.path),
+                        modified_at=_iso_utc(modified),
+                    ),
+                )
+            )
+    indexed.sort(key=lambda item: (-item[0], item[1].filename.lower()))
+    return [item[1] for item in indexed]
+
+
+def _build_connect_packet(preview_limit: int = CONNECT_PREVIEW_LIMIT) -> ConnectPacketOut:
+    limit = max(1, int(preview_limit))
+    catalog = _scan_connect_previews()
+    preview = catalog[:limit]
+    sample_path = preview[0].filename if preview else "song.wav"
+    recommended = "register_from_data" if catalog else "upload_then_master"
+
+    workflow_steps = [
+        "1. get_connect_packet or read auralmind://connect-kit",
+        "2. list_data_audio",
+        "3. register_audio_from_path",
+        "4. analyze_audio",
+        "5. run_master_job (or master_closed_loop)",
+        "6. job_status + job_result + read_artifact",
+    ]
+    if not catalog:
+        workflow_steps.insert(2, "3. upload_init -> upload_chunk -> upload_finalize")
+
+    example_calls: Dict[str, Any] = {
+        "list_data_audio": {},
+        "register_audio_from_path": {"path": sample_path},
+        "analyze_audio": {"audio_id": "aud_1234567890ab"},
+        "run_master_job": {
+            "audio_id": "aud_1234567890ab",
+            "preset_name": "hi_fi_streaming",
+            "target_lufs": -12.0,
+            "warmth": 0.5,
+            "transient_boost_db": 1.0,
+            "enable_harshness_limiter": True,
+            "enable_air_motion": True,
+            "bit_depth": "float32",
+        },
+        "job_status": {"job_id": "job_1234567890ab"},
+        "job_result": {"job_id": "job_1234567890ab"},
+        "master_closed_loop": {
+            "audio_id": "aud_1234567890ab",
+            "goal": "Streaming-ready, clear and punchy",
+            "platform": "spotify",
+        },
+    }
+    if not catalog:
+        example_calls["upload_init"] = {"filename": "song.wav", "total_bytes": 12345678, "sha256": "<sha256>"}
+        example_calls["upload_chunk"] = {"upload_id": "upl_1234567890ab", "index": 0, "chunk_b64": "<base64-chunk>"}
+        example_calls["upload_finalize"] = {"upload_id": "upl_1234567890ab"}
+
+    return ConnectPacketOut(
+        generated_at=_iso_utc(time.time()),
+        preview_limit=limit,
+        total_songs=len(catalog),
+        songs_preview=preview,
+        recommended_first_path=recommended,
+        workflow_steps=workflow_steps,
+        example_calls=example_calls,
+    )
 
 
 def _decode_base64_payload(payload_b64: str) -> bytes:
@@ -442,6 +749,68 @@ def _decode_hex_payload(payload_hex: str) -> bytes:
         return binascii.unhexlify(compact)
     except binascii.Error as exc:
         raise ValueError("invalid_hex") from exc
+
+
+def _uploads_root(session_dir: str) -> str:
+    root = os.path.join(session_dir, ".uploads")
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def _upload_meta_path(session_dir: str, upload_id: str) -> str:
+    return os.path.join(_uploads_root(session_dir), f"{upload_id}.json")
+
+
+def _upload_part_path(session_dir: str, upload_id: str) -> str:
+    return os.path.join(_uploads_root(session_dir), f"{upload_id}.part")
+
+
+def _save_upload_meta(session_dir: str, upload_id: str, meta: Dict[str, Any]) -> None:
+    meta_path = _upload_meta_path(session_dir, upload_id)
+    tmp_path = f"{meta_path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+    os.replace(tmp_path, meta_path)
+
+
+def _load_upload_meta(session_dir: str, upload_id: str) -> Dict[str, Any]:
+    meta_path = _upload_meta_path(session_dir, upload_id)
+    if not os.path.exists(meta_path):
+        raise ValueError("not_found: Upload not found.")
+    with open(meta_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _delete_upload_meta(session_dir: str, upload_id: str) -> None:
+    meta_path = _upload_meta_path(session_dir, upload_id)
+    if os.path.exists(meta_path):
+        os.remove(meta_path)
+
+
+def _upload_status_from_meta(meta: Dict[str, Any]) -> UploadStatusOut:
+    total = int(meta["total_bytes"])
+    received = int(meta["received_bytes"])
+    return UploadStatusOut(
+        upload_id=str(meta["upload_id"]),
+        filename=str(meta["filename"]),
+        total_bytes=total,
+        received_bytes=received,
+        next_index=int(meta["next_index"]),
+        done=received >= total,
+        expected_sha256=meta.get("sha256"),
+    )
+
+
+def _decode_base64_chunk(chunk_b64: str) -> bytes:
+    compact = re.sub(r"\s+", "", chunk_b64 or "")
+    if not compact:
+        raise ValueError("missing_chunk")
+    if len(compact) > MAX_UPLOAD_CHUNK_B64_CHARS:
+        raise ValueError("chunk_too_large")
+    try:
+        return base64.b64decode(compact, validate=True)
+    except binascii.Error as exc:
+        raise ValueError("invalid_base64_chunk") from exc
 
 
 def _sanitize_filename(name: str, fallback: str = "audio") -> str:
@@ -474,8 +843,10 @@ def _guess_media_type(
 
 
 def _get_session_info(ctx: Optional[Context]) -> Tuple[str, str]:
-    if ctx is not None and ctx.session_id:
-        sid = str(ctx.session_id)
+    sid = getattr(ctx, "session_id", None) if ctx is not None else None
+    if sid:
+        sid = str(sid)
+        # Store by a short hash instead of raw session_id to avoid leaking client IDs to disk paths.
         key = hashlib.sha256(sid.encode("utf-8")).hexdigest()[:16]
         session_key = f"s_{key}"
     else:
@@ -494,6 +865,7 @@ def _artifact_data_path(session_dir: str, data_filename: str) -> str:
 
 
 def _register_artifact(session_key: str, entry: "ArtifactEntry", session_dir: str) -> None:
+    # Keep a memory cache for fast lookups, but also persist metadata so handles survive process restarts.
     with _ARTIFACTS_LOCK:
         _ARTIFACTS.setdefault(session_key, {})[entry.artifact_id] = entry
     meta_path = _artifact_meta_path(session_dir, entry.artifact_id)
@@ -519,11 +891,13 @@ def _load_artifact(
     session_dir: str,
     artifact_id: str,
 ) -> Optional["ArtifactEntry"]:
+    # Fast path from in-memory cache.
     with _ARTIFACTS_LOCK:
         cached = _ARTIFACTS.get(session_key, {}).get(artifact_id)
     if cached is not None:
         return cached
 
+    # Fallback to persisted JSON metadata written during registration.
     meta_path = _artifact_meta_path(session_dir, artifact_id)
     if not os.path.exists(meta_path):
         return None
@@ -568,6 +942,43 @@ def _store_bytes(
         media_type=media_type,
         size_bytes=size_bytes,
         sha256=sha256,
+        data_filename=data_filename,
+    )
+    _register_artifact(session_key, entry, session_dir)
+    return entry
+
+
+def _store_file_from_path(
+    session_key: str,
+    session_dir: str,
+    *,
+    artifact_id: str,
+    kind: str,
+    filename: str,
+    source_path: str,
+    media_type: str,
+) -> "ArtifactEntry":
+    safe_name = _sanitize_filename(filename)
+    ext = os.path.splitext(filename)[1].lower() or ".bin"
+    data_filename = f"{artifact_id}{ext}"
+    data_path = _artifact_data_path(session_dir, data_filename)
+    sha = hashlib.sha256()
+    size_bytes = 0
+    with open(source_path, "rb") as src, open(data_path, "wb") as dst:
+        while True:
+            chunk = src.read(1024 * 1024)
+            if not chunk:
+                break
+            dst.write(chunk)
+            size_bytes += len(chunk)
+            sha.update(chunk)
+    entry = ArtifactEntry(
+        artifact_id=artifact_id,
+        kind=kind,
+        filename=safe_name,
+        media_type=media_type,
+        size_bytes=size_bytes,
+        sha256=sha.hexdigest(),
         data_filename=data_filename,
     )
     _register_artifact(session_key, entry, session_dir)
@@ -764,7 +1175,7 @@ def _master_internal(
     audio_id: str,
     req: MasterRequest,
     run_id: str,
-    ctx: Context = None,
+    ctx: Context = None, # pyright: ignore[reportArgumentType]
     *,
     session_key: Optional[str] = None,
     session_dir: Optional[str] = None,
@@ -894,6 +1305,8 @@ def _run_master_job_worker(job_id: str) -> None:
         )
         return
 
+    # Explicit lifecycle transitions keep polling deterministic for clients:
+    # queued -> running -> done|error.
     _update_job(job_id, status="running", started_at=time.time(), progress=5)
     try:
         req = MasterRequest(audio_id=job.audio_id, **job.settings.model_dump())
@@ -938,19 +1351,7 @@ def _run_master_job_worker(job_id: str) -> None:
     annotations={"readOnlyHint": True, "idempotentHint": True},
 )
 async def get_workflow_resource() -> str:
-    steps = [
-        "1. bootstrap: Call to see available tools and initial workflow.",
-        "2. upload_audio_to_session: Upload source WAV/FLAC.",
-        "3. analyze_audio: Get initial metrics.",
-        "4. list_presets: Explore available mastering presets.",
-        "5. propose_master_settings: Validate/clamp settings.",
-        "6. run_master_job: Start async mastering.",
-        "7. job_status: Poll for completion.",
-        "8. job_result: Fetch artifacts + metrics.",
-        "9. read_artifact: Download WAV/JSON chunks.",
-        "Optional: master_closed_loop for automated 2-pass mastering."
-    ]
-    return json.dumps({"workflow": steps}, indent=2)
+    return json.dumps({"workflow": BOOTSTRAP_WORKFLOW_STEPS}, indent=2)
 
 
 @mcp.resource(
@@ -990,18 +1391,7 @@ def get_presets_resource() -> str:
     presets = maestro.get_presets()
     payload: Dict[str, Any] = {}
     for name, p in presets.items():
-        payload[name] = {
-            "target_lufs": float(p.target_lufs),
-            "ceiling_dbfs": float(p.ceiling_dbfs),
-            "limiter_mode": str(getattr(p, "limiter_mode", "v2")),
-            "governor_gr_limit_db": float(p.governor_gr_limit_db),
-            "match_strength": float(p.match_strength),
-            "enable_harshness_limiter": bool(p.enable_harshness_limiter),
-            "enable_air_motion": bool(getattr(p, "enable_air_motion", True)),
-            "warmth": float(getattr(p, "warmth", 0.0)),
-            "transient_sculpt_boost_db": float(getattr(p, "transient_sculpt_boost_db", 0.0)),
-            "bit_depth": str(getattr(p, "bit_depth", "float32")),
-        }
+        payload[name] = _serialize_preset(p, include_extended=True)
     return json.dumps({"presets": payload}, indent=2)
 
 
@@ -1014,9 +1404,20 @@ def get_presets_resource() -> str:
 )
 def get_contracts_resource() -> str:
     model_schemas = {
+        "ConnectSongPreview": ConnectSongPreview.model_json_schema(),
+        "ConnectPacketOut": ConnectPacketOut.model_json_schema(),
         "AnalyzeIn": AnalyzeIn.model_json_schema(),
         "UploadIn": UploadIn.model_json_schema(),
         "UploadResult": UploadResult.model_json_schema(),
+        "UploadInitIn": UploadInitIn.model_json_schema(),
+        "UploadInitOut": UploadInitOut.model_json_schema(),
+        "UploadChunkIn": UploadChunkIn.model_json_schema(),
+        "UploadFinalizeIn": UploadFinalizeIn.model_json_schema(),
+        "UploadStatusOut": UploadStatusOut.model_json_schema(),
+        "AudioAssetInfo": AudioAssetInfo.model_json_schema(),
+        "AudioAssetList": AudioAssetList.model_json_schema(),
+        "RegisterAudioPathIn": RegisterAudioPathIn.model_json_schema(),
+        "RegisterAudioResult": RegisterAudioResult.model_json_schema(),
         "AudioMetrics": AudioMetrics.model_json_schema(),
         "PresetsOut": PresetsOut.model_json_schema(),
         "MasterSettings": MasterSettings.model_json_schema(),
@@ -1037,6 +1438,14 @@ def get_contracts_resource() -> str:
         "FileWriteOut": FileWriteOut.model_json_schema(),
     }
     tool_map = {
+        "get_connect_packet": {"input": "Empty", "output": "ConnectPacketOut"},
+        "list_audio_assets": {"input": "Empty", "output": "AudioAssetList"},
+        "list_data_audio": {"input": "Empty", "output": "AudioAssetList"},
+        "register_audio_from_path": {"input": "RegisterAudioPathIn", "output": "RegisterAudioResult"},
+        "upload_init": {"input": "UploadInitIn", "output": "UploadInitOut"},
+        "upload_chunk": {"input": "UploadChunkIn", "output": "UploadStatusOut"},
+        "upload_status": {"input": "upload_id:string", "output": "UploadStatusOut"},
+        "upload_finalize": {"input": "UploadFinalizeIn", "output": "UploadResult"},
         "upload_audio_to_session": {"input": "UploadIn", "output": "UploadResult"},
         "analyze_audio": {"input": "AnalyzeIn", "output": "AudioMetrics"},
         "list_presets": {"input": "Empty", "output": "PresetsOut"},
@@ -1054,12 +1463,31 @@ def get_contracts_resource() -> str:
 
 
 @mcp.resource(
+    uri="auralmind://connect-kit",
+    name="ConnectKit",
+    description="Connect-time discovery payload with song preview and next-call templates.",
+    mime_type="application/json",
+    annotations={"readOnlyHint": True, "idempotentHint": True},
+)
+def get_connect_kit_resource() -> str:
+    packet = _build_connect_packet()
+    payload = {
+        "notes": [
+            "Read this resource immediately after connect.",
+            "Use `register_audio_from_path` for server-side files.",
+            "Use `upload_init/upload_chunk/upload_finalize` if no songs are present.",
+        ],
+        "packet": packet.model_dump(),
+    }
+    return json.dumps(payload, indent=2)
+
+
+@mcp.resource(
     uri="config://system-prompt",
     name="SystemPrompt",
     description="Cognitive mastering system prompt.",
     mime_type="text/markdown",
     annotations={"readOnlyHint": True, "idempotentHint": True},
-    tags={"config"},
 )
 def get_system_prompt() -> str:
     """Returns the AuralMind Cognitive Mastering system prompt."""
@@ -1073,7 +1501,6 @@ def get_system_prompt() -> str:
     description="LLM-facing MCP usage guide for AuralMind Maestro.",
     mime_type="text/markdown",
     annotations={"readOnlyHint": True, "idempotentHint": True},
-    tags={"config", "docs"},
 )
 def get_mcp_docs() -> str:
     """Returns the MCP usage guide bundled with the server."""
@@ -1087,18 +1514,23 @@ def get_mcp_docs() -> str:
     description="Server configuration and limits.",
     mime_type="application/json",
     annotations={"readOnlyHint": True, "idempotentHint": True},
-    tags={"config"},
 )
 def get_server_info() -> str:
     """Provides server metadata and limits as JSON."""
     payload = {
         "name": SERVER_NAME,
-        "version": "7.3.0-pro",
+        "version": SERVER_VERSION,
+        "transport": ACTIVE_TRANSPORT,
         "max_upload_bytes": MAX_UPLOAD_BYTES,
         "max_upload_b64_chars": MAX_UPLOAD_B64_CHARS,
         "max_upload_hex_chars": MAX_UPLOAD_HEX_CHARS,
+        "upload_chunk_max_bytes": UPLOAD_CHUNK_MAX_BYTES,
+        "max_upload_chunk_b64_chars": MAX_UPLOAD_CHUNK_B64_CHARS,
+        "connect_preview_limit": CONNECT_PREVIEW_LIMIT,
         "max_read_bytes": MAX_READ_BYTES,
         "supported_bit_depths": ["float32", "float64"],
+        "data_dir": DATA_DIR,
+        "allowed_audio_extensions": sorted(ALLOWED_AUDIO_EXTENSIONS),
     }
     return json.dumps(payload, indent=2)
 
@@ -1109,12 +1541,30 @@ def get_server_info() -> str:
 @mcp.prompt(name="on_connect")
 async def on_connect_prompt() -> list[Message]:
     """Directed onboarding for new clients."""
+    packet = _build_connect_packet()
+    preview_names = ", ".join(song.filename for song in packet.songs_preview[:5]) if packet.songs_preview else "None"
+    if packet.total_songs > 0:
+        flow_hint = (
+            "1) call `get_connect_packet` or read `auralmind://connect-kit` "
+            "2) call `list_data_audio` "
+            "3) call `register_audio_from_path` using one preview filename "
+            "4) call `analyze_audio` "
+            "5) call `run_master_job` (or `master_closed_loop`)."
+        )
+    else:
+        flow_hint = (
+            "No songs found in `data/`. "
+            "Use upload flow: `upload_init` -> `upload_chunk` -> `upload_finalize`, then `analyze_audio` and `run_master_job`."
+        )
     return [
         Message(
             role="assistant",
-            content="Welcome to AuralMind Maestro. Please call the `bootstrap` tool first to see available workflows and catalogs. "
-                    "Then read `auralmind://workflow` for step-by-step instructions. "
-                    "Use `config://mcp-docs` for full usage guidance."
+            content=(
+                f"Welcome to AuralMind Maestro. Songs detected: {packet.total_songs}. "
+                f"Recent songs: {preview_names}. "
+                f"{flow_hint} "
+                "Use `bootstrap` for complete catalogs and `config://mcp-docs` for full usage guidance."
+            ),
         )
     ]
 
@@ -1128,7 +1578,8 @@ async def master_once_prompt(
     """Single-pass mastering guide."""
     return (
         f"Master {file_uri} for {platform} with goal '{goal}'. "
-        "Steps: 1) upload_audio_to_session 2) analyze_audio 3) master_audio."
+        "Steps: 1) register_audio_from_path or upload_init/upload_chunk/upload_finalize "
+        "(or upload_audio_to_session) 2) analyze_audio 3) master_audio."
     )
 
 
@@ -1148,13 +1599,12 @@ def master_closed_loop_prompt(
 @mcp.prompt(
     name="generate-mastering-strategy",
     description="Legacy strategy generator.",
-    tags={"mastering", "prompt"},
 )
 def generate_strategy(
     integrated_lufs: Annotated[float, Field(description="Integrated loudness (LUFS).")],
     crest_db: Annotated[float, Field(description="Crest factor (dB).")],
     platform: Annotated[Platform, Field(description="Target platform.")],
-) -> PromptResult:
+) -> str:
     """Generates a prompt with the system instructions and measured metrics."""
     prompt_content = get_system_prompt()
     metrics = {
@@ -1167,10 +1617,7 @@ def generate_strategy(
         f"INPUT_METRICS:\n{json.dumps(metrics, indent=2)}\n\n"
         "Respond with the JSON strategy object."
     )
-    return PromptResult(
-        messages=[Message(role="user", content=prompt)],
-        description="Mastering strategy prompt with embedded metrics.",
-    )
+    return prompt
 
 
 # ===========================================================================
@@ -1179,66 +1626,13 @@ def generate_strategy(
 @mcp.tool()
 def bootstrap() -> BootstrapOut:
     """First-contact discovery: returns capabilities, catalogs, and example calls."""
-    caps = capabilities()
-
-    tools = [
-        ToolCatalogEntry(name="bootstrap", description="Discovery", input_model="Empty", output_model="BootstrapOut"),
-        ToolCatalogEntry(name="upload_audio_to_session", description="Upload audio", input_model="UploadIn", output_model="UploadResult"),
-        ToolCatalogEntry(name="analyze_audio", description="Analyze", input_model="AnalyzeIn", output_model="AudioMetrics"),
-        ToolCatalogEntry(name="list_presets", description="List presets", input_model="Empty", output_model="PresetsOut"),
-        ToolCatalogEntry(name="propose_master_settings", description="Validate settings", input_model="MasterSettings", output_model="ProposedSettingsOut"),
-        ToolCatalogEntry(name="run_master_job", description="Async mastering job", input_model="MasterRequest", output_model="JobLaunchOut"),
-        ToolCatalogEntry(name="job_status", description="Poll job status", input_model="JobIdIn", output_model="JobStatusOut"),
-        ToolCatalogEntry(name="job_result", description="Fetch job result", input_model="JobIdIn", output_model="JobResultOut"),
-        ToolCatalogEntry(name="master_audio", description="Run master (once)", input_model="MasterRequest", output_model="MasterResult"),
-        ToolCatalogEntry(name="master_closed_loop", description="Expert multi-pass master", input_model="ClosedLoopRequest", output_model="ClosedLoopResult"),
-        ToolCatalogEntry(name="read_artifact", description="Read artifact", input_model="ArtifactReadIn", output_model="ArtifactReadResult"),
-        ToolCatalogEntry(name="safe_read_text", description="Read file", input_model="FileReadIn", output_model="FileReadOut"),
-        ToolCatalogEntry(name="safe_write_text", description="Write file", input_model="FileWriteIn", output_model="FileWriteOut"),
-    ]
-
-    resources = [
-        ResourceCatalogEntry(uri="config://system-prompt", description="System prompt", mime_type="text/markdown", annotations={"readOnlyHint": True}),
-        ResourceCatalogEntry(uri="config://mcp-docs", description="Usage docs", mime_type="text/markdown", annotations={"readOnlyHint": True}),
-        ResourceCatalogEntry(uri="config://server-info", description="Server limits", mime_type="application/json", annotations={"readOnlyHint": True}),
-        ResourceCatalogEntry(uri="auralmind://workflow", description="Workflow steps", mime_type="application/json", annotations={"readOnlyHint": True}),
-        ResourceCatalogEntry(uri="auralmind://metrics", description="Metrics & Scoring", mime_type="application/json", annotations={"readOnlyHint": True}),
-        ResourceCatalogEntry(uri="auralmind://presets", description="Preset Guide", mime_type="application/json", annotations={"readOnlyHint": True}),
-        ResourceCatalogEntry(uri="auralmind://contracts", description="Tool contracts", mime_type="application/json", annotations={"readOnlyHint": True}),
-    ]
-
-    prompts = [
-        PromptCatalogEntry(name="on_connect", description="Client onboarding", args_schema={}),
-        PromptCatalogEntry(name="master_once", description="Single-pass plan", args_schema={"file_uri": "string", "goal": "string", "platform": "string"}),
-        PromptCatalogEntry(name="master_closed_loop_prompt", description="Closure plan", args_schema={"file_uri": "string", "goal": "string", "platform": "string"}),
-        PromptCatalogEntry(name="generate-mastering-strategy", description="Strategy generator", args_schema={"integrated_lufs": "float", "crest_db": "float", "platform": "string"}),
-    ]
-
     return BootstrapOut(
-        capabilities=caps,
-        tools=tools,
-        resources=resources,
-        prompts=prompts,
-        workflow_steps=[
-            "1. bootstrap",
-            "2. upload_audio_to_session",
-            "3. analyze_audio",
-            "4. list_presets",
-            "5. propose_master_settings",
-            "6. run_master_job",
-            "7. job_status",
-            "8. job_result",
-            "9. read_artifact",
-            "Optional: master_closed_loop",
-        ],
-        example_calls={
-            "upload": {"filename": "song.wav", "payload_b64": "<base64>"},
-            "analyze": {"audio_id": "aud_1234567890ab"},
-            "propose": {"preset_name": "hi_fi_streaming", "target_lufs": -12.5},
-            "run_job": {"audio_id": "aud_1234567890ab", "preset_name": "hi_fi_streaming"},
-            "job_status": {"job_id": "job_1234567890ab"},
-            "job_result": {"job_id": "job_1234567890ab"},
-        }
+        capabilities=capabilities(),
+        tools=_tool_catalog_entries(),
+        resources=_resource_catalog_entries(),
+        prompts=_prompt_catalog_entries(),
+        workflow_steps=list(BOOTSTRAP_WORKFLOW_STEPS),
+        example_calls=dict(BOOTSTRAP_EXAMPLE_CALLS),
     )
 
 
@@ -1247,9 +1641,100 @@ def capabilities() -> CapabilitiesOut:
     """Returns server capabilities and features."""
     return CapabilitiesOut(
         server_name=SERVER_NAME,
-        version="7.3.0-pro",
-        transport="http",
-        features=["async_jobs", "closed_loop_mastering", "resources", "prompts", "safe_filesystem"]
+        version=SERVER_VERSION,
+        transport=ACTIVE_TRANSPORT,
+        features=[
+            "async_jobs",
+            "closed_loop_mastering",
+            "resources",
+            "prompts",
+            "safe_filesystem",
+            "server_side_ingest",
+            "chunked_upload",
+            "connect_discovery",
+        ]
+    )
+
+
+@mcp.tool()
+def get_connect_packet() -> ConnectPacketOut:
+    """Returns a first-contact packet with song preview and call templates."""
+    return _build_connect_packet()
+
+
+@mcp.tool()
+def list_audio_assets() -> AudioAssetList:
+    """List audio files available inside the data directory."""
+    assets: List[AudioAssetInfo] = []
+    with os.scandir(DATA_DIR) as entries:
+        for entry in entries:
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            ext = os.path.splitext(entry.name)[1].lower()
+            if ext not in ALLOWED_AUDIO_EXTENSIONS:
+                continue
+            size_bytes = entry.stat(follow_symlinks=False).st_size
+            duration = _safe_audio_duration(entry.path)
+            assets.append(AudioAssetInfo(
+                filename=entry.name,
+                size_bytes=size_bytes,
+                format=ext[1:],
+                duration_seconds=duration,
+            ))
+    assets.sort(key=lambda item: item.filename.lower())
+    return AudioAssetList(assets)
+
+
+@mcp.tool()
+def list_data_audio() -> AudioAssetList:
+    """Alias for list_audio_assets for client compatibility."""
+    return list_audio_assets()
+
+
+@mcp.tool()
+def register_audio_from_path(
+    path: Annotated[str, Field(description="Path to an audio file within the data directory.")],
+    ctx: Context = None,
+) -> RegisterAudioResult:
+    """Register a server-side audio file without upload."""
+    resolved = _resolve_data_path(path)
+    if not os.path.isfile(resolved):
+        raise ValueError("not_found")
+    if not os.access(resolved, os.R_OK):
+        raise ValueError("unreadable")
+
+    _, fmt = _audio_format_from_path(resolved)
+    size_hint = os.path.getsize(resolved)
+    if size_hint <= 0:
+        raise ValueError("empty_file")
+
+    session_key, session_dir = _get_session_info(ctx)
+    audio_id = _new_id("aud")
+    filename = os.path.basename(resolved)
+    media_type = _guess_media_type(filename, fallback="audio/wav")
+    entry = _store_file_from_path(
+        session_key,
+        session_dir,
+        artifact_id=audio_id,
+        kind="audio",
+        filename=filename,
+        source_path=resolved,
+        media_type=media_type,
+    )
+    registered_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    log.info(
+        "registered_audio_from_path audio_id=%s filename=%s size_bytes=%s format=%s",
+        audio_id,
+        entry.filename,
+        entry.size_bytes,
+        fmt,
+    )
+    return RegisterAudioResult(
+        audio_id=audio_id,
+        format=fmt,
+        size_bytes=entry.size_bytes,
+        checksum=entry.sha256,
+        registered_at=registered_at,
     )
 
 
@@ -1306,16 +1791,7 @@ def list_presets() -> PresetsOut:
     presets = maestro.get_presets()
     out = {}
     for name, p in presets.items():
-        out[name] = PresetSummary(
-            target_lufs=float(p.target_lufs),
-            ceiling_dbfs=float(p.ceiling_dbfs),
-            limiter_mode=str(getattr(p, "limiter_mode", "v2")),
-            governor_gr_limit_db=float(p.governor_gr_limit_db),
-            match_strength=float(p.match_strength),
-            enable_harshness_limiter=bool(p.enable_harshness_limiter),
-            enable_air_motion=bool(getattr(p, "enable_air_motion", True)),
-            bit_depth=str(getattr(p, "bit_depth", "float32")),
-        )
+        out[name] = PresetSummary(**_serialize_preset(p))
     return PresetsOut(presets=out)
 
 
@@ -1581,6 +2057,160 @@ def master_closed_loop(req: ClosedLoopRequest, ctx: Context = None) -> ClosedLoo
 # TOOLS - SYSTEM
 # ===========================================================================
 @mcp.tool()
+def upload_init(req: UploadInitIn, ctx: Context = None) -> UploadInitOut:
+    """Initialize a resumable chunked upload."""
+    ext = os.path.splitext(req.filename)[1].lower()
+    if ext not in ALLOWED_AUDIO_EXTENSIONS:
+        raise ValueError("unsupported_format")
+
+    expected_sha = req.sha256.lower() if req.sha256 else None
+    if expected_sha and not re.fullmatch(r"[a-f0-9]{64}", expected_sha):
+        raise ValueError("invalid_sha256")
+
+    _, session_dir = _get_session_info(ctx)
+    upload_id = f"upl_{uuid.uuid4().hex[:12]}"
+    meta: Dict[str, Any] = {
+        "upload_id": upload_id,
+        "filename": _sanitize_filename(req.filename),
+        "total_bytes": int(req.total_bytes),
+        "received_bytes": 0,
+        "next_index": 0,
+        "sha256": expected_sha,
+        "created_at": time.time(),
+        "updated_at": time.time(),
+    }
+    with _UPLOAD_LOCK:
+        with open(_upload_part_path(session_dir, upload_id), "wb"):
+            pass
+        _save_upload_meta(session_dir, upload_id, meta)
+
+    return UploadInitOut(
+        upload_id=upload_id,
+        filename=meta["filename"],
+        total_bytes=meta["total_bytes"],
+        received_bytes=0,
+        next_index=0,
+        chunk_max_bytes=UPLOAD_CHUNK_MAX_BYTES,
+        done=False,
+    )
+
+
+@mcp.tool()
+def upload_status(
+    upload_id: Annotated[str, Field(description="Upload handle from upload_init.")],
+    ctx: Context = None,
+) -> UploadStatusOut:
+    """Read resumable upload status."""
+    if not UPLOAD_ID_RE.match(upload_id):
+        raise ValueError("invalid_upload_id")
+    _, session_dir = _get_session_info(ctx)
+    with _UPLOAD_LOCK:
+        meta = _load_upload_meta(session_dir, upload_id)
+        return _upload_status_from_meta(meta)
+
+
+@mcp.tool()
+def upload_chunk(req: UploadChunkIn, ctx: Context = None) -> UploadStatusOut:
+    """Append one ordered chunk to an active upload."""
+    if not UPLOAD_ID_RE.match(req.upload_id):
+        raise ValueError("invalid_upload_id")
+    chunk = _decode_base64_chunk(req.chunk_b64)
+    if not chunk:
+        raise ValueError("empty_chunk")
+    if len(chunk) > UPLOAD_CHUNK_MAX_BYTES:
+        raise ValueError("chunk_too_large")
+
+    _, session_dir = _get_session_info(ctx)
+    with _UPLOAD_LOCK:
+        meta = _load_upload_meta(session_dir, req.upload_id)
+        next_index = int(meta["next_index"])
+        total = int(meta["total_bytes"])
+        received = int(meta["received_bytes"])
+
+        # Idempotency: if the caller retries an already-accepted chunk index, return current status.
+        if req.index < next_index:
+            return _upload_status_from_meta(meta)
+        # Strict sequencing protects against missing/duplicated chunk writes.
+        if req.index != next_index:
+            raise ValueError(f"out_of_order_chunk: expected index {next_index}")
+        if received >= total:
+            return _upload_status_from_meta(meta)
+        if received + len(chunk) > total:
+            raise ValueError("chunk_overflow")
+
+        part_path = _upload_part_path(session_dir, req.upload_id)
+        current_size = os.path.getsize(part_path) if os.path.exists(part_path) else 0
+        if current_size != received:
+            raise ValueError("upload_state_mismatch")
+        with open(part_path, "ab") as f:
+            f.write(chunk)
+
+        meta["received_bytes"] = received + len(chunk)
+        meta["next_index"] = next_index + 1
+        meta["updated_at"] = time.time()
+        _save_upload_meta(session_dir, req.upload_id, meta)
+        return _upload_status_from_meta(meta)
+
+
+@mcp.tool()
+def upload_finalize(req: UploadFinalizeIn, ctx: Context = None) -> UploadResult:
+    """Finalize upload, verify checksum, and register audio artifact."""
+    if not UPLOAD_ID_RE.match(req.upload_id):
+        raise ValueError("invalid_upload_id")
+    session_key, session_dir = _get_session_info(ctx)
+
+    with _UPLOAD_LOCK:
+        meta = _load_upload_meta(session_dir, req.upload_id)
+        total = int(meta["total_bytes"])
+        received = int(meta["received_bytes"])
+        if received != total:
+            raise ValueError("upload_incomplete")
+
+        part_path = _upload_part_path(session_dir, req.upload_id)
+        if not os.path.exists(part_path):
+            raise ValueError("upload_missing_part")
+        part_size = os.path.getsize(part_path)
+        if part_size != total:
+            raise ValueError("upload_state_mismatch")
+
+        sha = hashlib.sha256()
+        with open(part_path, "rb") as f:
+            while True:
+                buf = f.read(1024 * 1024)
+                if not buf:
+                    break
+                sha.update(buf)
+        digest = sha.hexdigest()
+        expected = meta.get("sha256")
+        if expected and digest != expected:
+            raise ValueError("sha256_mismatch")
+
+        filename = str(meta["filename"])
+        ext = os.path.splitext(filename)[1].lower() or ".bin"
+        audio_id = _new_id("aud")
+        data_filename = f"{audio_id}{ext}"
+        os.replace(part_path, _artifact_data_path(session_dir, data_filename))
+        entry = _register_existing_file(
+            session_key,
+            session_dir,
+            artifact_id=audio_id,
+            kind="audio",
+            filename=filename,
+            data_filename=data_filename,
+            media_type=_guess_media_type(filename, fallback="audio/wav"),
+        )
+        _delete_upload_meta(session_dir, req.upload_id)
+
+    return UploadResult(
+        audio_id=audio_id,
+        filename=entry.filename,
+        size_bytes=entry.size_bytes,
+        sha256=entry.sha256,
+        media_type=entry.media_type,
+    )
+
+
+@mcp.tool()
 def upload_audio_to_session(
     filename: Annotated[str, Field(description="Original filename.")],
     payload_b64: Annotated[Optional[str], Field(default=None, description="Base64 payload.")] = None,
@@ -1643,7 +2273,6 @@ def read_artifact(
 # Entrypoint
 # ===========================================================================
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-    port = int(os.environ.get("PORT", "8080"))
-    # Enforce streamable http but spec says http
-    mcp.run(transport="http", host="0.0.0.0", port=port)
+    mcp.run(
+        transport="stdio"
+    )
