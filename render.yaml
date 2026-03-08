@@ -1,7 +1,7 @@
 # Exported from Render on 2026-02-27T13:56:26Z
 version: "1"
 projects:
-- name: My project
+- name: AuralMind2
   environments:
   - name: Production
     services:
@@ -15,7 +15,7 @@ projects:
         sync: true
       region: oregon
       buildCommand: pip install -r requirements.txt
-      startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
+      startCommand: uvicorn server:mcp --host 0.0.0.0 --port 8000
       autoDeployTrigger: commit
       previews:
         generation: automatic
