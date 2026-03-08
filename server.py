@@ -72,6 +72,7 @@ JobStatus = Literal["queued", "running", "done", "error"]
 # ---------------------------------------------------------------------------
 mcp = FastMCP(
     name=SERVER_NAME,
+    streamable_http_path="/mcp",
     json_response=True,
 )
 
@@ -2990,7 +2991,7 @@ except Exception as e:
     log.warning(f"Failed to load MCP instructions on startup: {e}")
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-    port = int(os.environ.get("PORT", "8080"))
+    logging.basicConfig(filename="data/auralmind.log",level=logging.INFO, format="%(message)s")
+    port = int(os.environ.get("PORT", "8000"))
     # Enforce streamable http but spec says http
-    mcp.run(transport="stdio")
+    mcp.run(transport="streamable-http", host="0.0.0.0", port=port)
