@@ -44,7 +44,7 @@ import soundfile as sf
 import scipy.signal as sps
 from functools import lru_cache
 from scipy.signal import fftconvolve
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, replace, field
 from scipy.ndimage import maximum_filter1d
 from typing import Optional, Tuple, Dict, Any, Union
 
@@ -2077,6 +2077,11 @@ def stem_pre_master_pass(stem: np.ndarray, sr: int, stem_name: str, preset: "Pre
     y = apply_iir(y, b, a)
 
     name = stem_name.lower().strip()
+
+    # Phase 4 AI Intervention: Apply custom Demucs stem mix gains
+    if name in preset.stem_gains_db:
+        gain = db_to_lin(preset.stem_gains_db[name])
+        y = (y * gain).astype(np.float32)
     if "vocal" in name and preset.enable_deess:
         y = de_ess(
             y, sr,
@@ -2170,6 +2175,7 @@ class Preset:
     demucs_split: bool = True
     demucs_overlap: float = 0.23
     demucs_shifts: int = 1
+    stem_gains_db: Dict[str, float] = field(default_factory=dict)
 
     # Movement + HookLift (section-aware)
     enable_movement: bool = True
