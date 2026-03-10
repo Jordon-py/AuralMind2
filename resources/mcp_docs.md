@@ -1,6 +1,7 @@
 # AuralMind Maestro MCP - LLM Guide
 
-This server runs over `stdio` and exposes mastering workflows through MCP tools.
+This server supports `streamable-http` (deployment default) and `stdio` (local client default),
+and exposes mastering workflows through MCP tools.
 Use server-issued handles (`aud_*`, `job_*`, `art_*`) for all follow-up calls.
 
 ## Recommended Flow

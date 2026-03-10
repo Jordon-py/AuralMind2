@@ -1,7 +1,8 @@
 # AuralMind Maestro - MCP Mastering Server
 
 AuralMind Maestro is a FastMCP server that exposes an audio mastering pipeline as MCP tools.
-It is designed for `transport="stdio"` and returns stable handles (`aud_*`, `job_*`, `art_*`) instead of raw file paths.
+It supports both local `stdio` usage and remote `streamable-http` deployment,
+and returns stable handles (`aud_*`, `job_*`, `art_*`) instead of raw file paths.
 
 ## What This Server Does
 
@@ -10,10 +11,10 @@ It is designed for `transport="stdio"` and returns stable handles (`aud_*`, `job
 - Runs mastering asynchronously in background jobs.
 - Returns mastered audio and JSON artifacts via chunked reads.
 
-## Architecture (Stdio)
+## Architecture
 
 ```text
-LLM/Client -> FastMCP (stdio)
+LLM/Client -> FastMCP (stdio or streamable-http)
             -> resources
             -> prompts
             -> tools
@@ -39,29 +40,50 @@ uv pip install -r requirements.txt
 
 ## Run
 
+Remote deployment default (Streamable HTTP on `0.0.0.0:8080`):
+
 ```bash
 python3 server.py
 ```
 
-Or:
+Local stdio (recommended for desktop MCP clients):
 
 ```bash
-uv run server.py
+ACTIVE_TRANSPORT=stdio uv run server.py
 ```
 
-If using FastMCP CLI, use `stdio` explicitly:
+FastMCP CLI (stdio):
 
 ```bash
 fastmcp run server.py --transport stdio
 ```
 
-Or use the included `fastmcp.json` (defaults to `stdio`):
+FastMCP CLI (streamable-http, deployment shape):
+
+```bash
+fastmcp run server.py:mcp --transport streamable-http --host 0.0.0.0 --port 8080
+```
+
+Or use the included `fastmcp.json` (configured for streamable-http):
 
 ```bash
 fastmcp run
 ```
 
-`fastmcp run server.py` without `--transport stdio` defaults to Streamable HTTP, which starts Uvicorn on `127.0.0.1:8000`.
+Per FastMCP docs, `fastmcp run server.py` defaults to `stdio` unless `--transport` (or config deployment transport) is specified.
+
+## Horizon Deployment
+
+1. Validate your entrypoint locally:
+
+```bash
+fastmcp inspect server.py:mcp
+```
+
+2. Push this repo to GitHub and open Horizon at `https://horizon.prefect.io`.
+3. Select this repo, and set entrypoint to `server.py:mcp`.
+4. Keep transport as streamable HTTP and deploy.
+5. Horizon will expose a URL like `https://<server>.fastmcp.app/mcp`.
 
 ## Happy Path (Recommended)
 

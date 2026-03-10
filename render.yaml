@@ -15,7 +15,7 @@ projects:
         sync: true
       region: oregon
       buildCommand: pip install -r requirements.txt
-      startCommand: uvicorn server:mcp --host 0.0.0.0 --port 8000
+      startCommand: python server.py
       autoDeployTrigger: commit
       previews:
         generation: automatic

@@ -1,9 +1,13 @@
 {
   "$schema": "https://gofastmcp.com/public/schemas/fastmcp.json/v1.json",
   "source": {
-    "path": "server.py"
+    "path": "server.py",
+    "entrypoint": "mcp"
   },
   "deployment": {
-    "transport": "stdio"
+    "transport": "streamable-http",
+    "host": "0.0.0.0",
+    "port": 8080,
+    "path": "/mcp"
   }
 }
