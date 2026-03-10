@@ -1,37 +1,26 @@
 from __future__ import annotations
 
 """
-AuralMind Maestro - FastMCP Server
-=================================
+AuralMind2 - FastMCP mastering server
+=====================================
 
-Production-grade MCP server exposing the AuralMind mastering DSP pipeline
-as LLM-callable tools. Designed for non-blocking operation: heavy mastering
-jobs run in a background thread pool, while lightweight analysis and
-validation tools respond immediately.
+This module exposes the AuralMind mastering pipeline over FastMCP with
+streamable HTTP as the deployment default and stdio as the local-client
+override. Heavy mastering runs are queued in background workers while
+analysis, discovery, resources, and prompts stay synchronous and predictable.
 
-Architecture
-------------
+Runtime surface
+---------------
 
-    LLM client -> FastMCP (stdio)
-                     -> resources/  config://system-prompt, config://mcp-docs
-                                    config://server-info, auralmind://workflow
-                                    auralmind://metrics, auralmind://presets
-                     -> prompts/    generate-mastering-strategy
-                     -> tools/
-                          -> list_audio_assets         (sync,  instant)
-                          -> register_audio_from_path  (sync,  instant)
-                          -> upload_audio_to_session   (sync,  ~instant, legacy)
-                          -> analyze_audio             (sync,  ~2 s)
-                          -> list_presets              (sync,  instant)
-                          -> propose_master_settings   (sync,  instant)
-                          -> run_master_job            (async, returns job_id)
-                          -> job_status                (sync,  instant)
-                          -> job_result                (sync,  instant)
-                          -> master_audio              (sync,  direct run)
-                          -> master_closed_loop        (sync,  2-pass)
-                          -> read_artifact             (sync,  chunked download)
-                          -> safe_read_text            (sync,  allowlist read)
-                          -> safe_write_text           (sync,  allowlist write)
+    LLM client -> FastMCP
+                     -> 33 tools
+                     -> 8 resources
+                     -> 4 prompts
+                     -> ASGI app export for streamable HTTP hosts
+
+The exported `app` is intended for hosts such as Render. The `main()` entry
+point preserves direct `python server.py` execution and selects transport from
+environment variables.
 """
 
 import os
@@ -51,16 +40,35 @@ from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Tuple, Literal, Annotated, Callable
 
-from mcp.server.fastmcp import FastMCP, Context
-from mcp.server.fastmcp.prompts.base import Message
+from fastmcp import FastMCP, Context
+from fastmcp.prompts import Message
 from pydantic import BaseModel, Field, ConfigDict, RootModel, model_validator
 import soundfile as sf
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
-load_dotenv(".env")
+ROOT_DIR = os.path.abspath(os.path.dirname(__file__))
+load_dotenv(os.path.join(ROOT_DIR, ".env"))
 
 log = logging.getLogger("auralmind.server")
 
 SERVER_NAME = "AuralMind2"
+VERSION = "0.1.0"
+ACTIVE_TRANSPORT_ENV = "ACTIVE_TRANSPORT"
+DEFAULT_ACTIVE_TRANSPORT = "streamable-http"
+SUPPORTED_TRANSPORTS = ("stdio", "sse", "streamable-http")
+_TRANSPORT_ALIASES = {
+    "http": "streamable-http",
+    "streamable_http": "streamable-http",
+    "streamablehttp": "streamable-http",
+}
+HTTP_HOST_ENV = "MCP_HOST"
+HTTP_PORT_ENV = "PORT"
+HTTP_PATH_ENV = "MCP_PATH"
+DEFAULT_HTTP_HOST = "0.0.0.0"
+DEFAULT_HTTP_PORT = 8080
+DEFAULT_HTTP_PATH = "/mcp"
+HTTP_APP_TRANSPORT = "streamable-http"
 
 Platform = Literal["spotify", "apple_music", "youtube", "soundcloud", "club"]
 # prefer float64 for audio processing and float32 for audio output
@@ -72,14 +80,11 @@ JobStatus = Literal["queued", "running", "done", "error"]
 # ---------------------------------------------------------------------------
 mcp = FastMCP(
     name=SERVER_NAME,
-    streamable_http_path="/mcp",
-    json_response=True,
 )
 
 # ---------------------------------------------------------------------------
 # Session storage
 # ---------------------------------------------------------------------------
-ROOT_DIR = os.path.abspath(os.path.dirname(__file__))
 DATA_DIR = os.path.join(ROOT_DIR, "data")
 DEFAULT_STORAGE_DIR = os.path.join(tempfile.gettempdir(), "maestro_sessions")
 STORAGE_DIR = os.path.abspath(os.environ.get("MAESTRO_SESSION_DIR", DEFAULT_STORAGE_DIR))
@@ -99,6 +104,21 @@ MCP_DOCS_PATH = os.path.join(
 # ---------------------------------------------------------------------------
 MAX_UPLOAD_BYTES = 400 * 1024 * 1024  # 400 MB after decode
 MAX_UPLOAD_B64_CHARS = int(MAX_UPLOAD_BYTES * 4 / 3) + 4
+
+BOOTSTRAP_WORKFLOW_STEPS = [
+    "Upload audio (upload_audio_to_session or register_audio_from_path)",
+    "Analyze (analyze_audio)",
+    "Select/Optimize preset (list_presets / analyze_and_optimize_governor)",
+    "Run master job (run_master_job)",
+    "Poll status (job_status)",
+    "Download result (job_result -> read_artifact)"
+]
+
+BOOTSTRAP_EXAMPLE_CALLS = {
+    "bootstrap": {"method": "tools/call", "params": {"name": "bootstrap", "arguments": {}}},
+    "list_presets": {"method": "tools/call", "params": {"name": "list_presets", "arguments": {}}},
+    "master_once": {"method": "tools/call", "params": {"name": "master_audio", "arguments": {"audio_id": "aud_...", "preset_name": "hi_fi_streaming"}}}
+}
 MAX_UPLOAD_HEX_CHARS = MAX_UPLOAD_BYTES * 2
 UPLOAD_CHUNK_MAX_BYTES = int(os.environ.get("UPLOAD_CHUNK_MAX_BYTES", str(1024 * 1024)))  # 1 MiB
 MAX_UPLOAD_CHUNK_B64_CHARS = int(UPLOAD_CHUNK_MAX_BYTES * 4 / 3) + 4
@@ -122,6 +142,59 @@ _JOB_EXECUTOR = ThreadPoolExecutor(
 )
 
 
+def _active_transport() -> str:
+    raw_transport = str(os.environ.get(ACTIVE_TRANSPORT_ENV, DEFAULT_ACTIVE_TRANSPORT)).strip().lower()
+    normalized_transport = _TRANSPORT_ALIASES.get(raw_transport, raw_transport)
+    if normalized_transport not in SUPPORTED_TRANSPORTS:
+        log.warning(
+            "Unsupported %s=%r. Falling back to %s.",
+            ACTIVE_TRANSPORT_ENV,
+            raw_transport,
+            DEFAULT_ACTIVE_TRANSPORT,
+        )
+        return DEFAULT_ACTIVE_TRANSPORT
+    return normalized_transport
+
+
+def _http_host() -> str:
+    host = str(os.environ.get(HTTP_HOST_ENV, DEFAULT_HTTP_HOST)).strip()
+    return host or DEFAULT_HTTP_HOST
+
+
+def _http_port() -> int:
+    raw_port = str(os.environ.get(HTTP_PORT_ENV, DEFAULT_HTTP_PORT)).strip()
+    try:
+        parsed = int(raw_port)
+    except ValueError:
+        log.warning("Invalid %s=%r. Falling back to %s.", HTTP_PORT_ENV, raw_port, DEFAULT_HTTP_PORT)
+        return DEFAULT_HTTP_PORT
+
+    if parsed < 1 or parsed > 65535:
+        log.warning("Out-of-range %s=%r. Falling back to %s.", HTTP_PORT_ENV, raw_port, DEFAULT_HTTP_PORT)
+        return DEFAULT_HTTP_PORT
+    return parsed
+
+
+def _http_path() -> str:
+    path = str(os.environ.get(HTTP_PATH_ENV, DEFAULT_HTTP_PATH)).strip()
+    if not path:
+        return DEFAULT_HTTP_PATH
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return path
+
+
+def _run_kwargs_for_active_transport() -> Dict[str, Any]:
+    transport = _active_transport()
+    run_kwargs: Dict[str, Any] = {"transport": transport}
+    if transport != "stdio":
+        run_kwargs["host"] = _http_host()
+        run_kwargs["port"] = _http_port()
+        run_kwargs["path"] = _http_path()
+        run_kwargs["json_response"] = True
+    return run_kwargs
+
+
 # ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
@@ -136,9 +209,9 @@ class ErrorEnvelope(StrictBaseModel):
 
 
 class CapabilitiesOut(StrictBaseModel):
-    server_name: str = Field(..., description="Name of the MCP server.")
+    server_name: str = Field(SERVER_NAME, description="Name of the MCP server.")
     version: str = Field(..., description="Server version.")
-    transport: str = Field(..., description="Active transport (stdio).")
+    transport: str = Field(..., description="Active transport (stdio, sse, or streamable-http).")
     features: List[str] = Field(..., description="List of enabled features.")
 
 
@@ -275,6 +348,9 @@ class ClosedLoopRequest(StrictBaseModel):
     audio_id: str = Field(..., description="Source audio handle.")
     goal: str = Field(..., description="Mastering goal (e.g. 'Club-ready', 'Intimate Acoustic').")
     platform: Platform = Field("spotify", description="Target platform.")
+    governor_search_steps: Optional[int] = Field(None, description="Override governor binary search steps.")
+    governor_gr_limit_db: Optional[float] = Field(None, description="Override governor GR limit.")
+    stem_gains_db: Optional[Dict[str, float]] = Field(None, description="Demucs stem gain adjustments (dB).")
 
 
 class TuneDelta(StrictBaseModel):
@@ -561,7 +637,6 @@ class JobState:
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
-
 def _valid_handle(handle: str, prefix: Optional[str] = None) -> bool:
     if not isinstance(handle, str) or not HANDLE_RE.match(handle):
         return False
@@ -718,6 +793,110 @@ def _build_connect_packet(preview_limit: int = CONNECT_PREVIEW_LIMIT) -> Connect
         workflow_steps=workflow_steps,
         example_calls=example_calls,
     )
+
+
+def _tool_catalog_entries() -> List[ToolCatalogEntry]:
+    return [
+        ToolCatalogEntry(name="bootstrap", description="Discovery", input_model="Empty", output_model="BootstrapOut"),
+        ToolCatalogEntry(name="capabilities", description="Server capability summary", input_model="Empty", output_model="CapabilitiesOut"),
+        ToolCatalogEntry(name="get_connect_packet", description="First-contact packet with song preview and next calls", input_model="Empty", output_model="ConnectPacketOut"),
+        ToolCatalogEntry(name="list_audio_assets", description="List audio files in the data directory", input_model="Empty", output_model="AudioAssetList"),
+        ToolCatalogEntry(name="list_data_audio", description="Compatibility alias for list_audio_assets", input_model="Empty", output_model="AudioAssetList"),
+        ToolCatalogEntry(name="register_audio_from_path", description="Register a server-side audio file from data/", input_model="RegisterAudioPathIn", output_model="RegisterAudioResult"),
+        ToolCatalogEntry(name="upload_init", description="Start a resumable upload session", input_model="UploadInitIn", output_model="UploadInitOut"),
+        ToolCatalogEntry(name="upload_chunk", description="Append a chunk to a resumable upload", input_model="UploadChunkIn", output_model="UploadStatusOut"),
+        ToolCatalogEntry(name="upload_status", description="Inspect resumable upload progress", input_model="upload_id:string", output_model="UploadStatusOut"),
+        ToolCatalogEntry(name="upload_finalize", description="Finalize a resumable upload into an audio handle", input_model="UploadFinalizeIn", output_model="UploadResult"),
+        ToolCatalogEntry(name="upload_audio_to_session", description="Legacy one-shot upload", input_model="UploadIn", output_model="UploadResult"),
+        ToolCatalogEntry(name="analyze_audio", description="Analyze a source audio handle", input_model="AnalyzeIn", output_model="AudioMetrics"),
+        ToolCatalogEntry(name="list_presets", description="List mastering presets", input_model="Empty", output_model="PresetsOut"),
+        ToolCatalogEntry(name="propose_master_settings", description="Validate and normalize mastering settings", input_model="MasterSettings", output_model="ProposedSettingsOut"),
+        ToolCatalogEntry(name="run_master_job", description="Queue an async mastering job", input_model="MasterRequest", output_model="JobLaunchOut"),
+        ToolCatalogEntry(name="job_status", description="Poll a mastering job", input_model="JobIdIn", output_model="JobStatusOut"),
+        ToolCatalogEntry(name="job_result", description="Fetch completed mastering job results", input_model="JobIdIn", output_model="JobResultOut"),
+        ToolCatalogEntry(name="master_audio", description="Run a single-pass master immediately", input_model="MasterRequest", output_model="MasterResult"),
+        ToolCatalogEntry(name="master_closed_loop", description="Run expert multi-pass mastering", input_model="ClosedLoopRequest", output_model="ClosedLoopResult"),
+        ToolCatalogEntry(name="read_artifact", description="Read artifact bytes in chunks", input_model="ArtifactReadIn", output_model="ArtifactReadResult"),
+        ToolCatalogEntry(name="safe_read_text", description="Read a text file inside the allowlist", input_model="FileReadIn", output_model="FileReadOut"),
+        ToolCatalogEntry(name="safe_write_text", description="Write a text file inside the allowlist", input_model="FileWriteIn", output_model="FileWriteOut"),
+        ToolCatalogEntry(name="cancel_job", description="Cancel a queued or running job", input_model="CancelJobIn", output_model="CancelJobOut"),
+        ToolCatalogEntry(name="delete_artifact", description="Delete a stored artifact", input_model="DeleteArtifactIn", output_model="DeleteArtifactOut"),
+        ToolCatalogEntry(name="compare_audio_metrics", description="Compare metrics from two analysis or artifact handles", input_model="CompareMetricsIn", output_model="CompareMetricsOut"),
+        ToolCatalogEntry(name="apply_musical_eq", description="Apply key-aware resonant EQ", input_model="MusicalEqIn", output_model="MusicalEqOut"),
+        ToolCatalogEntry(name="apply_tempo_dynamics", description="Apply tempo-synced groove compression", input_model="TempoDynamicsIn", output_model="TempoDynamicsOut"),
+        ToolCatalogEntry(name="apply_harmonic_excitation", description="Apply harmonic saturation", input_model="HarmonicExcitationIn", output_model="HarmonicExcitationOut"),
+        ToolCatalogEntry(name="start_interactive_mastering", description="Start an interactive stage-1 master", input_model="StartInteractiveMasteringIn", output_model="StartInteractiveMasteringOut"),
+        ToolCatalogEntry(name="commit_interactive_mastering", description="Commit interactive mastering tweaks", input_model="CommitInteractiveMasteringIn", output_model="CommitInteractiveMasteringOut"),
+        ToolCatalogEntry(name="semantic_a_b_mastering", description="Run semantic A/B mastering variants", input_model="SemanticABMasteringIn", output_model="SemanticABMasteringOut"),
+        ToolCatalogEntry(name="analyze_and_optimize_governor", description="Optimize governor loops via crest analysis", input_model="AnalyzeAndOptimizeGovernorIn", output_model="AnalyzeAndOptimizeGovernorOut"),
+        ToolCatalogEntry(name="ai_stem_remix", description="Analyze Demucs stems for mix intervention", input_model="AiStemRemixIn", output_model="AiStemRemixOut"),
+    ]
+
+
+def _resource_catalog_entries() -> List[ResourceCatalogEntry]:
+    return [
+        ResourceCatalogEntry(uri="auralmind://connect-kit", description="Connect-time discovery payload", mime_type="application/json", annotations={"readOnlyHint": True, "idempotentHint": True}),
+        ResourceCatalogEntry(uri="config://system-prompt", description="System prompt", mime_type="text/markdown", annotations={"readOnlyHint": True, "idempotentHint": True}),
+        ResourceCatalogEntry(uri="config://mcp-docs", description="Usage docs", mime_type="text/markdown", annotations={"readOnlyHint": True, "idempotentHint": True}),
+        ResourceCatalogEntry(uri="config://server-info", description="Server limits and transport metadata", mime_type="application/json", annotations={"readOnlyHint": True, "idempotentHint": True}),
+        ResourceCatalogEntry(uri="auralmind://workflow", description="Workflow steps", mime_type="application/json", annotations={"readOnlyHint": True, "idempotentHint": True}),
+        ResourceCatalogEntry(uri="auralmind://metrics", description="Metrics and scoring thresholds", mime_type="application/json", annotations={"readOnlyHint": True, "idempotentHint": True}),
+        ResourceCatalogEntry(uri="auralmind://presets", description="Preset guide", mime_type="application/json", annotations={"readOnlyHint": True, "idempotentHint": True}),
+        ResourceCatalogEntry(uri="auralmind://contracts", description="Tool contracts", mime_type="application/json", annotations={"readOnlyHint": True, "idempotentHint": True}),
+    ]
+
+
+def _prompt_catalog_entries() -> List[PromptCatalogEntry]:
+    return [
+        PromptCatalogEntry(name="on_connect", description="Client onboarding", args_schema={}),
+        PromptCatalogEntry(name="master_once", description="Single-pass plan", args_schema={"file_uri": "string", "goal": "string", "platform": "string"}),
+        PromptCatalogEntry(name="master_closed_loop_prompt", description="Closure plan", args_schema={"file_uri": "string", "goal": "string", "platform": "string"}),
+        PromptCatalogEntry(name="generate-mastering-strategy", description="Strategy generator", args_schema={"integrated_lufs": "float", "crest_db": "float", "platform": "string"}),
+    ]
+
+
+def _tool_contract_map() -> Dict[str, Dict[str, str]]:
+    return {
+        entry.name: {"input": entry.input_model, "output": entry.output_model}
+        for entry in _tool_catalog_entries()
+    }
+
+
+def _bootstrap_example_calls(packet: ConnectPacketOut) -> Dict[str, Any]:
+    examples = {
+        "bootstrap": {"method": "tools/call", "params": {"name": "bootstrap", "arguments": {}}},
+        "capabilities": {"method": "tools/call", "params": {"name": "capabilities", "arguments": {}}},
+        "get_connect_packet": {"method": "tools/call", "params": {"name": "get_connect_packet", "arguments": {}}},
+        "list_presets": {"method": "tools/call", "params": {"name": "list_presets", "arguments": {}}},
+        "propose_master_settings": {
+            "method": "tools/call",
+            "params": {
+                "name": "propose_master_settings",
+                "arguments": {
+                    "preset_name": "hi_fi_streaming",
+                    "target_lufs": -12.0,
+                    "warmth": 0.5,
+                    "transient_boost_db": 1.0,
+                    "enable_harshness_limiter": True,
+                    "enable_air_motion": True,
+                    "bit_depth": "float32",
+                },
+            },
+        },
+        "master_once": {
+            "method": "tools/call",
+            "params": {
+                "name": "master_audio",
+                "arguments": {
+                    "audio_id": "aud_1234567890ab",
+                    "preset_name": "hi_fi_streaming",
+                },
+            },
+        },
+    }
+    for name, arguments in packet.example_calls.items():
+        examples[name] = {"method": "tools/call", "params": {"name": name, "arguments": arguments}}
+    return examples
 
 
 def _decode_base64_payload(payload_b64: str) -> bytes:
@@ -1204,13 +1383,28 @@ def _master_internal(
     presets = maestro.get_presets()
     if req.preset_name not in presets:
         raise ValueError(f"unknown_preset: {req.preset_name}")
-    preset = replace(presets[req.preset_name],
-                     target_lufs=req.target_lufs,
-                     warmth=req.warmth,
-                     transient_sculpt_boost_db=req.transient_boost_db,
-                     enable_harshness_limiter=req.enable_harshness_limiter,
-                     enable_air_motion=req.enable_air_motion,
-                     bit_depth=req.bit_depth)
+
+    # Base preset
+    base_p = presets[req.preset_name]
+
+    # Overrides
+    p_args = {
+        "target_lufs": req.target_lufs,
+        "warmth": req.warmth,
+        "transient_sculpt_boost_db": req.transient_boost_db,
+        "enable_harshness_limiter": req.enable_harshness_limiter,
+        "enable_air_motion": req.enable_air_motion,
+        "bit_depth": req.bit_depth,
+    }
+    if req.governor_search_steps is not None:
+        p_args["governor_search_steps"] = req.governor_search_steps
+    if req.governor_gr_limit_db is not None:
+        p_args["governor_gr_limit_db"] = req.governor_gr_limit_db
+    if req.stem_gains_db:
+        p_args["stem_gains_db"] = req.stem_gains_db
+        p_args["enable_stem_separation"] = True
+
+    preset = replace(base_p, **p_args)
 
     maestro.master(
         target_path=_artifact_data_path(session_dir, entry.data_filename),
@@ -1348,7 +1542,14 @@ def _run_master_job_worker(job_id: str) -> None:
     annotations={"readOnlyHint": True, "idempotentHint": True},
 )
 async def get_workflow_resource() -> str:
-    return json.dumps({"workflow": BOOTSTRAP_WORKFLOW_STEPS}, indent=2)
+    packet = _build_connect_packet()
+    return json.dumps(
+        {
+            "workflow": packet.workflow_steps,
+            "recommended_first_path": packet.recommended_first_path,
+        },
+        indent=2,
+    )
 
 
 @mcp.resource(
@@ -1401,6 +1602,8 @@ def get_presets_resource() -> str:
 )
 def get_contracts_resource() -> str:
     model_schemas = {
+        "CapabilitiesOut": CapabilitiesOut.model_json_schema(),
+        "BootstrapOut": BootstrapOut.model_json_schema(),
         "ConnectSongPreview": ConnectSongPreview.model_json_schema(),
         "ConnectPacketOut": ConnectPacketOut.model_json_schema(),
         "AnalyzeIn": AnalyzeIn.model_json_schema(),
@@ -1457,39 +1660,7 @@ def get_contracts_resource() -> str:
         "AiStemRemixIn": AiStemRemixIn.model_json_schema(),
         "AiStemRemixOut": AiStemRemixOut.model_json_schema(),
     }
-    tool_map = {
-        "get_connect_packet": {"input": "Empty", "output": "ConnectPacketOut"},
-        "list_audio_assets": {"input": "Empty", "output": "AudioAssetList"},
-        "list_data_audio": {"input": "Empty", "output": "AudioAssetList"},
-        "register_audio_from_path": {"input": "RegisterAudioPathIn", "output": "RegisterAudioResult"},
-        "upload_init": {"input": "UploadInitIn", "output": "UploadInitOut"},
-        "upload_chunk": {"input": "UploadChunkIn", "output": "UploadStatusOut"},
-        "upload_status": {"input": "upload_id:string", "output": "UploadStatusOut"},
-        "upload_finalize": {"input": "UploadFinalizeIn", "output": "UploadResult"},
-        "upload_audio_to_session": {"input": "UploadIn", "output": "UploadResult"},
-        "analyze_audio": {"input": "AnalyzeIn", "output": "AudioMetrics"},
-        "list_presets": {"input": "Empty", "output": "PresetsOut"},
-        "propose_master_settings": {"input": "MasterSettings", "output": "ProposedSettingsOut"},
-        "run_master_job": {"input": "MasterRequest", "output": "JobLaunchOut"},
-        "job_status": {"input": "JobIdIn", "output": "JobStatusOut"},
-        "job_result": {"input": "JobIdIn", "output": "JobResultOut"},
-        "master_audio": {"input": "MasterRequest", "output": "MasterResult"},
-        "master_closed_loop": {"input": "ClosedLoopRequest", "output": "ClosedLoopResult"},
-        "read_artifact": {"input": "ArtifactReadIn", "output": "ArtifactReadResult"},
-        "safe_read_text": {"input": "FileReadIn", "output": "FileReadOut"},
-        "safe_write_text": {"input": "FileWriteIn", "output": "FileWriteOut"},
-        "cancel_job": {"input": "CancelJobIn", "output": "CancelJobOut"},
-        "delete_artifact": {"input": "DeleteArtifactIn", "output": "DeleteArtifactOut"},
-        "compare_audio_metrics": {"input": "CompareMetricsIn", "output": "CompareMetricsOut"},
-        "apply_musical_eq": {"input": "MusicalEqIn", "output": "MusicalEqOut"},
-        "apply_tempo_dynamics": {"input": "TempoDynamicsIn", "output": "TempoDynamicsOut"},
-        "apply_harmonic_excitation": {"input": "HarmonicExcitationIn", "output": "HarmonicExcitationOut"},
-        "start_interactive_mastering": {"input": "StartInteractiveMasteringIn", "output": "StartInteractiveMasteringOut"},
-        "commit_interactive_mastering": {"input": "CommitInteractiveMasteringIn", "output": "CommitInteractiveMasteringOut"},
-        "semantic_a_b_mastering": {"input": "SemanticABMasteringIn", "output": "SemanticABMasteringOut"},
-        "analyze_and_optimize_governor": {"input": "AnalyzeAndOptimizeGovernorIn", "output": "AnalyzeAndOptimizeGovernorOut"},
-        "ai_stem_remix": {"input": "AiStemRemixIn", "output": "AiStemRemixOut"},
-    }
+    tool_map = _tool_contract_map()
     return json.dumps({"models": model_schemas, "tools": tool_map}, indent=2)
 
 
@@ -1550,8 +1721,12 @@ def get_server_info() -> str:
     """Provides server metadata and limits as JSON."""
     payload = {
         "name": SERVER_NAME,
-        "version": SERVER_VERSION,
-        "transport": ACTIVE_TRANSPORT,
+        "version": VERSION,
+        "transport": _active_transport(),
+        "http_host": _http_host(),
+        "http_port": _http_port(),
+        "http_path": _http_path(),
+        "supported_transports": list(SUPPORTED_TRANSPORTS),
         "max_upload_bytes": MAX_UPLOAD_BYTES,
         "max_upload_b64_chars": MAX_UPLOAD_B64_CHARS,
         "max_upload_hex_chars": MAX_UPLOAD_HEX_CHARS,
@@ -1657,59 +1832,15 @@ def generate_strategy(
 @mcp.tool()
 def bootstrap() -> BootstrapOut:
     """First-contact discovery: returns capabilities, catalogs, and example calls."""
-    caps = capabilities()
-
-    tools = [
-        ToolCatalogEntry(name="bootstrap", description="Discovery", input_model="Empty", output_model="BootstrapOut"),
-        ToolCatalogEntry(name="upload_audio_to_session", description="Upload audio", input_model="UploadIn", output_model="UploadResult"),
-        ToolCatalogEntry(name="analyze_audio", description="Analyze", input_model="AnalyzeIn", output_model="AudioMetrics"),
-        ToolCatalogEntry(name="list_presets", description="List presets", input_model="Empty", output_model="PresetsOut"),
-        ToolCatalogEntry(name="propose_master_settings", description="Validate settings", input_model="MasterSettings", output_model="ProposedSettingsOut"),
-        ToolCatalogEntry(name="run_master_job", description="Async mastering job", input_model="MasterRequest", output_model="JobLaunchOut"),
-        ToolCatalogEntry(name="job_status", description="Poll job status", input_model="JobIdIn", output_model="JobStatusOut"),
-        ToolCatalogEntry(name="job_result", description="Fetch job result", input_model="JobIdIn", output_model="JobResultOut"),
-        ToolCatalogEntry(name="master_audio", description="Run master (once)", input_model="MasterRequest", output_model="MasterResult"),
-        ToolCatalogEntry(name="master_closed_loop", description="Expert multi-pass master", input_model="ClosedLoopRequest", output_model="ClosedLoopResult"),
-        ToolCatalogEntry(name="read_artifact", description="Read artifact", input_model="ArtifactReadIn", output_model="ArtifactReadResult"),
-        ToolCatalogEntry(name="safe_read_text", description="Read file", input_model="FileReadIn", output_model="FileReadOut"),
-        ToolCatalogEntry(name="safe_write_text", description="Write file", input_model="FileWriteIn", output_model="FileWriteOut"),
-        ToolCatalogEntry(name="cancel_job", description="Cancel a queued/running job", input_model="CancelJobIn", output_model="CancelJobOut"),
-        ToolCatalogEntry(name="delete_artifact", description="Delete an artifact to free space", input_model="DeleteArtifactIn", output_model="DeleteArtifactOut"),
-        ToolCatalogEntry(name="compare_audio_metrics", description="Compare two audio metrics sets", input_model="CompareMetricsIn", output_model="CompareMetricsOut"),
-        ToolCatalogEntry(name="apply_musical_eq", description="Apply Key-Aware Resonant EQ.", input_model="MusicalEqIn", output_model="MusicalEqOut"),
-        ToolCatalogEntry(name="apply_tempo_dynamics", description="Apply Tempo-Synced Groove Compression.", input_model="TempoDynamicsIn", output_model="TempoDynamicsOut"),
-        ToolCatalogEntry(name="apply_harmonic_excitation", description="Apply Harmonic Saturation.", input_model="HarmonicExcitationIn", output_model="HarmonicExcitationOut"),
-        ToolCatalogEntry(name="start_interactive_mastering", description="Start an interactive Stage 1 master.", input_model="StartInteractiveMasteringIn", output_model="StartInteractiveMasteringOut"),
-        ToolCatalogEntry(name="commit_interactive_mastering", description="Commit custom tweaks for Stage 2 master.", input_model="CommitInteractiveMasteringIn", output_model="CommitInteractiveMasteringOut"),
-        ToolCatalogEntry(name="semantic_a_b_mastering", description="Parallel process A/B semantic testing.", input_model="SemanticABMasteringIn", output_model="SemanticABMasteringOut"),
-        ToolCatalogEntry(name="analyze_and_optimize_governor", description="Optimize governor loops via crest analysis.", input_model="AnalyzeAndOptimizeGovernorIn", output_model="AnalyzeAndOptimizeGovernorOut"),
-        ToolCatalogEntry(name="ai_stem_remix", description="Analyze Demucs stems LUFS for mix intervention.", input_model="AiStemRemixIn", output_model="AiStemRemixOut"),
-    ]
-
-    resources = [
-        ResourceCatalogEntry(uri="config://system-prompt", description="System prompt", mime_type="text/markdown", annotations={"readOnlyHint": True}),
-        ResourceCatalogEntry(uri="config://mcp-docs", description="Usage docs", mime_type="text/markdown", annotations={"readOnlyHint": True}),
-        ResourceCatalogEntry(uri="config://server-info", description="Server limits", mime_type="application/json", annotations={"readOnlyHint": True}),
-        ResourceCatalogEntry(uri="auralmind://workflow", description="Workflow steps", mime_type="application/json", annotations={"readOnlyHint": True}),
-        ResourceCatalogEntry(uri="auralmind://metrics", description="Metrics & Scoring", mime_type="application/json", annotations={"readOnlyHint": True}),
-        ResourceCatalogEntry(uri="auralmind://presets", description="Preset Guide", mime_type="application/json", annotations={"readOnlyHint": True}),
-        ResourceCatalogEntry(uri="auralmind://contracts", description="Tool contracts", mime_type="application/json", annotations={"readOnlyHint": True}),
-    ]
-
-    prompts = [
-        PromptCatalogEntry(name="on_connect", description="Client onboarding", args_schema={}),
-        PromptCatalogEntry(name="master_once", description="Single-pass plan", args_schema={"file_uri": "string", "goal": "string", "platform": "string"}),
-        PromptCatalogEntry(name="master_closed_loop_prompt", description="Closure plan", args_schema={"file_uri": "string", "goal": "string", "platform": "string"}),
-        PromptCatalogEntry(name="generate-mastering-strategy", description="Strategy generator", args_schema={"integrated_lufs": "float", "crest_db": "float", "platform": "string"}),
-    ]
+    packet = _build_connect_packet()
 
     return BootstrapOut(
         capabilities=capabilities(),
         tools=_tool_catalog_entries(),
         resources=_resource_catalog_entries(),
         prompts=_prompt_catalog_entries(),
-        workflow_steps=list(BOOTSTRAP_WORKFLOW_STEPS),
-        example_calls=dict(BOOTSTRAP_EXAMPLE_CALLS),
+        workflow_steps=list(packet.workflow_steps),
+        example_calls=_bootstrap_example_calls(packet),
     )
 
 
@@ -1718,10 +1849,12 @@ def capabilities() -> CapabilitiesOut:
     """Returns server capabilities and features."""
     return CapabilitiesOut(
         server_name=SERVER_NAME,
-        version=SERVER_VERSION,
-        transport=ACTIVE_TRANSPORT,
+        version=VERSION,
+        transport=_active_transport(),
         features=[
+            "server_name",
             "async_jobs",
+            "bootstrap_discovery",
             "closed_loop_mastering",
             "resources",
             "prompts",
@@ -2145,6 +2278,9 @@ def master_closed_loop(req: ClosedLoopRequest, ctx: Context = None) -> ClosedLoo
         enable_harshness_limiter=bool(preset.enable_harshness_limiter),
         enable_air_motion=bool(getattr(preset, "enable_air_motion", True)),
         bit_depth=str(getattr(preset, "bit_depth", "float32")),
+        governor_search_steps=req.governor_search_steps,
+        governor_gr_limit_db=req.governor_gr_limit_db,
+        stem_gains_db=req.stem_gains_db,
     )
     res1 = _master_internal(
         req.audio_id,
@@ -2973,25 +3109,67 @@ async def ai_stem_remix(req: AiStemRemixIn, ctx: Context) -> AiStemRemixOut:
         mix_theory_advice=advice
     )
 
-# --- INITIALIZE MCP INSTRUCTIONS (SYSTEM PROMPT & CAPABILITIES) ---
-try:
-    _sys_prompt = get_system_prompt()
-    _bs = bootstrap()
-    _tools_str = "\n".join([f"- {t.name}: {t.description}" for t in _bs.tools])
-    _res_str = "\n".join([f"- {r.uri}: {r.description}" for r in _bs.resources])
 
-    mcp.instructions = (
-        f"{_sys_prompt}\n\n"
-        "=== MAPPED CAPABILITIES & CONTEXT ===\n"
-        f"Available Tools:\n{_tools_str}\n\n"
-        f"Available Resources:\n{_res_str}\n\n"
-        "Note: You can always call the `bootstrap` tool to see this list again."
+@mcp.custom_route("/", methods=["GET"])
+async def root_info(_request: Request) -> JSONResponse:
+    """Expose a lightweight root document so HTTP deployments are self-describing."""
+    return JSONResponse(
+        {
+            "name": SERVER_NAME,
+            "version": VERSION,
+            "transport": HTTP_APP_TRANSPORT,
+            "mcp_path": _http_path(),
+            "health_path": "/health",
+            "message": "AuralMind2 is running. Use the MCP endpoint at the configured mcp_path.",
+        }
+    )
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health_check(_request: Request) -> JSONResponse:
+    """Expose a simple health endpoint for hosts and smoke tests."""
+    return JSONResponse(
+        {
+            "ok": True,
+            "name": SERVER_NAME,
+            "version": VERSION,
+            "transport": HTTP_APP_TRANSPORT,
+            "mcp_path": _http_path(),
+        }
+    )
+
+# --- INITIALIZE MCP INSTRUCTIONS (LOG STARTUP) ---
+try:
+    _bs = bootstrap()
+    log.info(
+        "Server initialized with %s tools, %s resources, transport=%s.",
+        len(_bs.tools),
+        len(_bs.resources),
+        _active_transport(),
     )
 except Exception as e:
-    log.warning(f"Failed to load MCP instructions on startup: {e}")
+    log.warning(f"Failed to initialize server metadata: {e}")
+
+
+def create_http_app():
+    """Expose an ASGI app for streamable HTTP hosts such as Render."""
+    return mcp.http_app(
+        path=_http_path(),
+        transport=HTTP_APP_TRANSPORT,
+        json_response=True,
+    )
+
+
+app = create_http_app()
+
+
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    mcp.run(**_run_kwargs_for_active_transport())
+
 
 if __name__ == "__main__":
-    logging.basicConfig(filename="data/auralmind.log",level=logging.INFO, format="%(message)s")
-    port = int(os.environ.get("PORT", "8000"))
-    # Enforce streamable http but spec says http
-    mcp.run(transport="streamable-http", host="0.0.0.0", port=port)
+    main()

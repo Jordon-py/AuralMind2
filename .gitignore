@@ -1,7 +1,10 @@
 data/*.wav
+data/*.log
 data/complete/
 data/codex_mastered/
 maestro_sessions/
 .env
 .venv/
 __pycache__/
+.pytest_cache/
+masters/

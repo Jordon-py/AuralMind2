@@ -1,72 +1,54 @@
-# AuralMind Maestro MCP - LLM Guide
+# AuralMind2 MCP Guide
 
-This server runs over `stdio` and exposes mastering workflows through MCP tools.
-Use server-issued handles (`aud_*`, `job_*`, `art_*`) for all follow-up calls.
+Last updated: March 10, 2026
 
-## Recommended Flow
+AuralMind2 exposes audio-mastering workflows over FastMCP. The deployment default is `streamable-http`, and the primary MCP endpoint is `/mcp`.
 
-1. `get_connect_packet` (or read `auralmind://connect-kit`)
-2. `list_data_audio`
-3. `register_audio_from_path`
-4. `analyze_audio`
-5. Optional: `generate-mastering-strategy`
-6. `propose_master_settings`
-7. `run_master_job`
-8. Poll `job_status`
-9. `job_result`
-10. `read_artifact`
+## First-contact workflow
 
-Optional: `master_closed_loop` for deterministic 2-pass mastering.
+1. Call `bootstrap` for a full catalog of tools, resources, prompts, and schemas.
+2. Call `get_connect_packet` for a compact onboarding packet with sample calls.
+3. Call `list_data_audio` to inspect server-side source files.
+4. Call `register_audio_from_path` if the track already exists in `data/`.
+5. Use `upload_init`, `upload_chunk`, and `upload_finalize` if the track must be uploaded.
+6. Call `analyze_audio`.
+7. Call `propose_master_settings` or `analyze_and_optimize_governor`.
+8. Call `run_master_job`.
+9. Poll `job_status`.
+10. Call `job_result`, then `read_artifact`.
 
-## End-to-End Example
+## Prompt surface
+
+- `on_connect`: first-contact assistant guidance
+- `master_once`: single-pass workflow planning
+- `master_closed_loop_prompt`: deterministic multi-pass workflow planning
+- `generate-mastering-strategy`: legacy strategy generation prompt
+
+## Resource surface
+
+- `config://system-prompt`
+- `config://mcp-docs`
+- `config://server-info`
+- `auralmind://connect-kit`
+- `auralmind://workflow`
+- `auralmind://metrics`
+- `auralmind://presets`
+- `auralmind://contracts`
+
+## Upload guidance
+
+Use server-side registration when possible because it avoids large payload transfers:
 
 ```json
 {
   "name": "register_audio_from_path",
-  "arguments": { "path": "song.wav" }
-}
-```
-
-```json
-{
-  "name": "analyze_audio",
-  "arguments": { "audio_id": "aud_1234567890ab" }
-}
-```
-
-```json
-{
-  "name": "run_master_job",
   "arguments": {
-    "audio_id": "aud_1234567890ab",
-    "preset_name": "hi_fi_streaming",
-    "target_lufs": -12.0,
-    "warmth": 0.5,
-    "transient_boost_db": 1.0,
-    "enable_harshness_limiter": true,
-    "enable_air_motion": true,
-    "bit_depth": "float32"
+    "path": "song.wav"
   }
 }
 ```
 
-```json
-{
-  "name": "job_status",
-  "arguments": { "job_id": "job_1234567890ab" }
-}
-```
-
-```json
-{
-  "name": "job_result",
-  "arguments": { "job_id": "job_1234567890ab" }
-}
-```
-
-## Resumable Upload Mini-Example
-
-Use this if `data/` has no source file.
+Use resumable upload when the file is not already in `data/`:
 
 ```json
 {
@@ -74,7 +56,7 @@ Use this if `data/` has no source file.
   "arguments": {
     "filename": "song.wav",
     "total_bytes": 12345678,
-    "sha256": "<optional-sha256>"
+    "sha256": "optional-lowercase-sha256"
   }
 }
 ```
@@ -99,32 +81,60 @@ Use this if `data/` has no source file.
 }
 ```
 
-## Legacy Upload Note
+`upload_audio_to_session` is still available for legacy clients, but new clients should prefer the resumable upload flow.
 
-`upload_audio_to_session` remains available for older clients.
-For new clients, prefer `upload_init/upload_chunk/upload_finalize`.
+## Async mastering example
 
-## Resources
+```json
+{
+  "name": "run_master_job",
+  "arguments": {
+    "audio_id": "aud_1234567890ab",
+    "preset_name": "hi_fi_streaming",
+    "target_lufs": -12.0,
+    "warmth": 0.5,
+    "transient_boost_db": 1.0,
+    "enable_harshness_limiter": true,
+    "enable_air_motion": true,
+    "bit_depth": "float32"
+  }
+}
+```
 
-- `config://system-prompt`: cognitive mastering instructions.
-- `config://mcp-docs`: this guide.
-- `config://server-info`: limits, transport, and supported bit depth.
-- `auralmind://connect-kit`: first-contact packet with examples.
-- `auralmind://workflow`: ordered call sequence.
-- `auralmind://metrics`: scoring thresholds.
-- `auralmind://presets`: preset atlas.
-- `auralmind://contracts`: tool I/O schemas.
+```json
+{
+  "name": "job_status",
+  "arguments": {
+    "job_id": "job_1234567890ab"
+  }
+}
+```
 
-## Prompt
+```json
+{
+  "name": "job_result",
+  "arguments": {
+    "job_id": "job_1234567890ab"
+  }
+}
+```
 
-`generate-mastering-strategy(integrated_lufs, crest_db, platform)`
+## Contract guidance
 
-Map output settings to `propose_master_settings` / `run_master_job` inputs:
+- Treat `aud_*`, `job_*`, `art_*`, and `upl_*` identifiers as opaque server-issued handles.
+- Do not invent handles or file paths.
+- Use the JSON schemas in `auralmind://contracts` when building an agent or SDK wrapper.
+- Pydantic validation is strict for contract models, so extra fields should be avoided.
 
-- `preset_name`
-- `target_lufs`
-- `warmth`
-- `transient_boost_db`
-- `enable_harshness_limiter`
-- `enable_air_motion`
-- `bit_depth`
+## HTTP deployment notes
+
+- Root info endpoint: `/`
+- Health endpoint: `/health`
+- MCP endpoint: `/mcp`
+
+For local validation:
+
+```text
+http://127.0.0.1:8080/health
+http://127.0.0.1:8080/mcp
+```
