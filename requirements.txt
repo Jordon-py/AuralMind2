@@ -4,7 +4,7 @@ ffmpeg
 mcp
 numpy
 pydantic
-dotenv
+python-dotenv
 python-multipart
 scipy
 soundfile
@@ -14,3 +14,4 @@ torch
 demucs
 mcp[cli]
 fastmcp[tasks]
+uvicorn

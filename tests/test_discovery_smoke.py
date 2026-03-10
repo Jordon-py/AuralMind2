@@ -4,6 +4,8 @@ import unittest
 from unittest import mock
 
 import server
+from pydantic import ValidationError
+from starlette.testclient import TestClient
 
 
 class DiscoverySmokeTests(unittest.TestCase):
@@ -54,8 +56,21 @@ class DiscoverySmokeTests(unittest.TestCase):
                     "host": server.DEFAULT_HTTP_HOST,
                     "port": server.DEFAULT_HTTP_PORT,
                     "path": server.DEFAULT_HTTP_PATH,
+                    "json_response": True,
                 },
             )
+
+    def test_http_health_and_root_routes_are_available(self) -> None:
+        client = TestClient(server.app)
+        root_response = client.get("/")
+        self.assertEqual(root_response.status_code, 200)
+        self.assertEqual(root_response.json()["mcp_path"], server._http_path())
+
+        health_response = client.get("/health")
+        self.assertEqual(health_response.status_code, 200)
+        payload = health_response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["name"], server.SERVER_NAME)
 
     def test_bootstrap_examples_reference_known_tools(self) -> None:
         packet = server.bootstrap()
@@ -64,6 +79,12 @@ class DiscoverySmokeTests(unittest.TestCase):
             params = example.get("params", {})
             name = params.get("name")
             self.assertIn(name, tool_names)
+
+    def test_upload_model_rejects_missing_or_conflicting_payloads(self) -> None:
+        with self.assertRaises(ValidationError):
+            server.UploadIn(filename="song.wav")
+        with self.assertRaises(ValidationError):
+            server.UploadIn(filename="song.wav", payload_b64="abc", hex_payload="00ff")
 
     def test_system_prompt_resource_is_not_empty(self) -> None:
         prompt = server.get_system_prompt()

@@ -1,37 +1,26 @@
 from __future__ import annotations
 
 """
-AuralMind Maestro - FastMCP Server
-=================================
+AuralMind2 - FastMCP mastering server
+=====================================
 
-Production-grade MCP server exposing the AuralMind mastering DSP pipeline
-as LLM-callable tools. Designed for non-blocking operation: heavy mastering
-jobs run in a background thread pool, while lightweight analysis and
-validation tools respond immediately.
+This module exposes the AuralMind mastering pipeline over FastMCP with
+streamable HTTP as the deployment default and stdio as the local-client
+override. Heavy mastering runs are queued in background workers while
+analysis, discovery, resources, and prompts stay synchronous and predictable.
 
-Architecture
-------------
+Runtime surface
+---------------
 
-    LLM client -> FastMCP (stdio or streamable-http)
-                     -> resources/  config://system-prompt, config://mcp-docs
-                                    config://server-info, auralmind://workflow
-                                    auralmind://metrics, auralmind://presets
-                     -> prompts/    generate-mastering-strategy
-                     -> tools/
-                          -> list_audio_assets         (sync,  instant)
-                          -> register_audio_from_path  (sync,  instant)
-                          -> upload_audio_to_session   (sync,  ~instant, legacy)
-                          -> analyze_audio             (sync,  ~2 s)
-                          -> list_presets              (sync,  instant)
-                          -> propose_master_settings   (sync,  instant)
-                          -> run_master_job            (async, returns job_id)
-                          -> job_status                (sync,  instant)
-                          -> job_result                (sync,  instant)
-                          -> master_audio              (sync,  direct run)
-                          -> master_closed_loop        (sync,  2-pass)
-                          -> read_artifact             (sync,  chunked download)
-                          -> safe_read_text            (sync,  allowlist read)
-                          -> safe_write_text           (sync,  allowlist write)
+    LLM client -> FastMCP
+                     -> 33 tools
+                     -> 8 resources
+                     -> 4 prompts
+                     -> ASGI app export for streamable HTTP hosts
+
+The exported `app` is intended for hosts such as Render. The `main()` entry
+point preserves direct `python server.py` execution and selects transport from
+environment variables.
 """
 
 import os
@@ -51,12 +40,15 @@ from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Tuple, Literal, Annotated, Callable
 
-from mcp.server.fastmcp import FastMCP, Context
-from mcp.server.fastmcp.prompts.base import Message
+from fastmcp import FastMCP, Context
+from fastmcp.prompts import Message
 from pydantic import BaseModel, Field, ConfigDict, RootModel, model_validator
 import soundfile as sf
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
-load_dotenv(".env")
+ROOT_DIR = os.path.abspath(os.path.dirname(__file__))
+load_dotenv(os.path.join(ROOT_DIR, ".env"))
 
 log = logging.getLogger("auralmind.server")
 
@@ -76,6 +68,7 @@ HTTP_PATH_ENV = "MCP_PATH"
 DEFAULT_HTTP_HOST = "0.0.0.0"
 DEFAULT_HTTP_PORT = 8080
 DEFAULT_HTTP_PATH = "/mcp"
+HTTP_APP_TRANSPORT = "streamable-http"
 
 Platform = Literal["spotify", "apple_music", "youtube", "soundcloud", "club"]
 # prefer float64 for audio processing and float32 for audio output
@@ -87,13 +80,11 @@ JobStatus = Literal["queued", "running", "done", "error"]
 # ---------------------------------------------------------------------------
 mcp = FastMCP(
     name=SERVER_NAME,
-    json_response=True,
 )
 
 # ---------------------------------------------------------------------------
 # Session storage
 # ---------------------------------------------------------------------------
-ROOT_DIR = os.path.abspath(os.path.dirname(__file__))
 DATA_DIR = os.path.join(ROOT_DIR, "data")
 DEFAULT_STORAGE_DIR = os.path.join(tempfile.gettempdir(), "maestro_sessions")
 STORAGE_DIR = os.path.abspath(os.environ.get("MAESTRO_SESSION_DIR", DEFAULT_STORAGE_DIR))
@@ -200,6 +191,7 @@ def _run_kwargs_for_active_transport() -> Dict[str, Any]:
         run_kwargs["host"] = _http_host()
         run_kwargs["port"] = _http_port()
         run_kwargs["path"] = _http_path()
+        run_kwargs["json_response"] = True
     return run_kwargs
 
 
@@ -3117,6 +3109,35 @@ async def ai_stem_remix(req: AiStemRemixIn, ctx: Context) -> AiStemRemixOut:
         mix_theory_advice=advice
     )
 
+
+@mcp.custom_route("/", methods=["GET"])
+async def root_info(_request: Request) -> JSONResponse:
+    """Expose a lightweight root document so HTTP deployments are self-describing."""
+    return JSONResponse(
+        {
+            "name": SERVER_NAME,
+            "version": VERSION,
+            "transport": HTTP_APP_TRANSPORT,
+            "mcp_path": _http_path(),
+            "health_path": "/health",
+            "message": "AuralMind2 is running. Use the MCP endpoint at the configured mcp_path.",
+        }
+    )
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health_check(_request: Request) -> JSONResponse:
+    """Expose a simple health endpoint for hosts and smoke tests."""
+    return JSONResponse(
+        {
+            "ok": True,
+            "name": SERVER_NAME,
+            "version": VERSION,
+            "transport": HTTP_APP_TRANSPORT,
+            "mcp_path": _http_path(),
+        }
+    )
+
 # --- INITIALIZE MCP INSTRUCTIONS (LOG STARTUP) ---
 try:
     _bs = bootstrap()
@@ -3129,10 +3150,26 @@ try:
 except Exception as e:
     log.warning(f"Failed to initialize server metadata: {e}")
 
-if __name__ == "__main__":
+
+def create_http_app():
+    """Expose an ASGI app for streamable HTTP hosts such as Render."""
+    return mcp.http_app(
+        path=_http_path(),
+        transport=HTTP_APP_TRANSPORT,
+        json_response=True,
+    )
+
+
+app = create_http_app()
+
+
+def main() -> None:
     logging.basicConfig(
-        filename=os.path.join(DATA_DIR, "auralmind.log"),
         level=logging.INFO,
-        format="%(message)s",
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     mcp.run(**_run_kwargs_for_active_transport())
+
+
+if __name__ == "__main__":
+    main()

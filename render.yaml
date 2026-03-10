@@ -13,9 +13,15 @@ projects:
       envVars:
       - key: PORT
         sync: true
+      - key: ACTIVE_TRANSPORT
+        value: streamable-http
+      - key: MCP_HOST
+        value: 0.0.0.0
+      - key: MCP_PATH
+        value: /mcp
       region: oregon
       buildCommand: pip install -r requirements.txt
-      startCommand: python server.py
+      startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
       autoDeployTrigger: commit
       previews:
         generation: automatic
