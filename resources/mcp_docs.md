@@ -1,43 +1,38 @@
-# AuralMind2 MCP Guide
+# AuralMind2 MCP Operator Guide
 
-Last updated: March 10, 2026
+Last updated: March 11, 2026
 
-AuralMind2 exposes audio-mastering workflows over FastMCP. The deployment default is `streamable-http`, and the primary MCP endpoint is `/mcp`.
+This document is written for MCP clients, orchestration agents, and LLMs driving AuralMind2.
 
-## First-contact workflow
+## First principles
 
-1. Call `bootstrap` for a full catalog of tools, resources, prompts, and schemas.
-2. Call `get_connect_packet` for a compact onboarding packet with sample calls.
-3. Call `list_data_audio` to inspect server-side source files.
-4. Call `register_audio_from_path` if the track already exists in `data/`.
-5. Use `upload_init`, `upload_chunk`, and `upload_finalize` if the track must be uploaded.
-6. Call `analyze_audio`.
-7. Call `propose_master_settings` or `analyze_and_optimize_governor`.
-8. Call `run_master_job`.
-9. Poll `job_status`.
-10. Call `job_result`, then `read_artifact`.
+- Handles are opaque: `aud_*`, `art_*`, `job_*`, and `upl_*` are server-issued IDs.
+- Session state is isolated. Do not assume artifacts from one client session exist in another.
+- Use contracts from `auralmind://contracts` instead of guessing payload shapes.
+- Prefer semantic planning first, raw overrides second.
 
-## Prompt surface
+## Fast start
 
-- `on_connect`: first-contact assistant guidance
-- `master_once`: single-pass workflow planning
-- `master_closed_loop_prompt`: deterministic multi-pass workflow planning
-- `generate-mastering-strategy`: legacy strategy generation prompt
+1. Call `bootstrap`.
+2. Read `auralmind://control-surface`.
+3. Register or upload audio.
+4. Call `analyze_audio`.
+5. Call `plan_mastering_strategy`.
+6. Execute with `run_master_job`, `master_audio`, or `master_closed_loop`.
+7. Retrieve outputs with `job_result` and `read_artifact`.
 
-## Resource surface
+## Canonical call recipes
 
-- `config://system-prompt`
-- `config://mcp-docs`
-- `config://server-info`
-- `auralmind://connect-kit`
-- `auralmind://workflow`
-- `auralmind://metrics`
-- `auralmind://presets`
-- `auralmind://contracts`
+### Discover the server
 
-## Upload guidance
+```json
+{
+  "name": "bootstrap",
+  "arguments": {}
+}
+```
 
-Use server-side registration when possible because it avoids large payload transfers:
+### Register audio from `data/`
 
 ```json
 {
@@ -48,7 +43,7 @@ Use server-side registration when possible because it avoids large payload trans
 }
 ```
 
-Use resumable upload when the file is not already in `data/`:
+### Resumable upload
 
 ```json
 {
@@ -81,25 +76,96 @@ Use resumable upload when the file is not already in `data/`:
 }
 ```
 
-`upload_audio_to_session` is still available for legacy clients, but new clients should prefer the resumable upload flow.
+### Analyze source audio
 
-## Async mastering example
+```json
+{
+  "name": "analyze_audio",
+  "arguments": {
+    "audio_id": "aud_1234567890ab"
+  }
+}
+```
+
+### Plan from natural language
+
+```json
+{
+  "name": "plan_mastering_strategy",
+  "arguments": {
+    "audio_id": "aud_1234567890ab",
+    "goal": "Wide, punchy streaming master with tight low end and smooth highs",
+    "platform": "spotify",
+    "control_profile": {
+      "spatial_width": 0.45,
+      "harshness_control": 0.35,
+      "low_end_focus": 0.55
+    }
+  }
+}
+```
+
+`plan_mastering_strategy` returns:
+
+- source metrics
+- chosen preset
+- resolved `MasterSettings`
+- reasoning
+- warnings
+
+### Validate or modify explicit settings
+
+```json
+{
+  "name": "propose_master_settings",
+  "arguments": {
+    "preset_name": "competitive_trap",
+    "target_lufs": -11.2,
+    "warmth": 0.25,
+    "transient_boost_db": 2.3,
+    "enable_harshness_limiter": true,
+    "enable_air_motion": true,
+    "bit_depth": "float32",
+    "control_profile": {
+      "movement_amount": 0.45,
+      "low_end_focus": 0.5
+    },
+    "governor_search_steps": 5,
+    "governor_gr_limit_db": -2.0
+  }
+}
+```
+
+### Queue an async master
 
 ```json
 {
   "name": "run_master_job",
   "arguments": {
     "audio_id": "aud_1234567890ab",
-    "preset_name": "hi_fi_streaming",
-    "target_lufs": -12.0,
-    "warmth": 0.5,
-    "transient_boost_db": 1.0,
+    "preset_name": "competitive_trap",
+    "target_lufs": -11.2,
+    "warmth": 0.25,
+    "transient_boost_db": 2.3,
     "enable_harshness_limiter": true,
     "enable_air_motion": true,
-    "bit_depth": "float32"
+    "bit_depth": "float32",
+    "control_profile": {
+      "spatial_width": 0.25,
+      "movement_amount": 0.45,
+      "low_end_focus": 0.5
+    },
+    "governor_search_steps": 5,
+    "governor_gr_limit_db": -2.0,
+    "stem_gains_db": {
+      "vocals": 1.0,
+      "bass": -0.5
+    }
   }
 }
 ```
+
+### Poll and fetch result
 
 ```json
 {
@@ -119,22 +185,84 @@ Use resumable upload when the file is not already in `data/`:
 }
 ```
 
-## Contract guidance
+### Read artifact bytes
 
-- Treat `aud_*`, `job_*`, `art_*`, and `upl_*` identifiers as opaque server-issued handles.
-- Do not invent handles or file paths.
-- Use the JSON schemas in `auralmind://contracts` when building an agent or SDK wrapper.
-- Pydantic validation is strict for contract models, so extra fields should be avoided.
-
-## HTTP deployment notes
-
-- Root info endpoint: `/`
-- Health endpoint: `/health`
-- MCP endpoint: `/mcp`
-
-For local validation:
-
-```text
-http://127.0.0.1:8080/health
-http://127.0.0.1:8080/mcp
+```json
+{
+  "name": "read_artifact",
+  "arguments": {
+    "artifact_id": "art_1234567890ab",
+    "offset": 0,
+    "length": 1048576
+  }
+}
 ```
+
+## Control profile guidance
+
+The bounded `control_profile` is the preferred deep-control surface for LLMs.
+
+- `spatial_width`
+  Negative tightens the image, positive widens it.
+- `brightness_tilt`
+  Negative darkens/smooths, positive brightens/opens.
+- `harshness_control`
+  Negative relaxes fatigue protection, positive increases it.
+- `movement_amount`
+  Negative restrains motion, positive adds lift and animation.
+- `low_end_focus`
+  Negative lightens the low end, positive tightens and emphasizes it.
+
+Use `auralmind://control-surface` for the exact range and precedence rules.
+
+## Closed-loop mastering
+
+Use `master_closed_loop` when the goal is semantic and you want the server to plan, render, score, and optionally retune automatically.
+
+```json
+{
+  "name": "master_closed_loop",
+  "arguments": {
+    "audio_id": "aud_1234567890ab",
+    "goal": "Aggressive but smooth trap master with width and vocal clarity",
+    "platform": "spotify",
+    "control_profile": {
+      "spatial_width": 0.35,
+      "harshness_control": 0.4,
+      "movement_amount": 0.25
+    }
+  }
+}
+```
+
+## Advanced AI tools
+
+- `start_interactive_mastering`
+  Render a first pass, inspect returned metrics, then finalize with `commit_interactive_mastering`.
+- `semantic_a_b_mastering`
+  Compare two presets in parallel.
+- `analyze_and_optimize_governor`
+  Recommend governor search depth and GR ceiling from crest factor.
+- `ai_stem_remix`
+  Use Demucs to inspect stem loudness relationships and suggest stem gain overrides.
+
+## Troubleshooting
+
+- `not_found`
+  The referenced handle is unknown in the current session or the artifact type is wrong.
+- `not_ready`
+  The job is still running. Poll again.
+- `demucs_unavailable`
+  Stem analysis was requested but the environment does not have Demucs available.
+- `unknown_preset`
+  The preset name does not exist in the DSP engine.
+- `invalid_upload_id`, `upload_incomplete`, `sha256_mismatch`
+  Upload state is invalid; restart the upload flow.
+
+## Strong recommendations for LLM clients
+
+- Call `bootstrap` at the beginning of a new integration or test session.
+- Use `plan_mastering_strategy` unless the user already gave exact mastering parameters.
+- Use `propose_master_settings` before `run_master_job` when editing settings programmatically.
+- Prefer `control_profile` over large unbounded raw-DSP surfacing.
+- Read `auralmind://contracts` and `auralmind://control-surface` instead of inferring hidden rules.

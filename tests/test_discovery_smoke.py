@@ -17,6 +17,8 @@ class DiscoverySmokeTests(unittest.TestCase):
     def test_bootstrap_resources_include_connect_kit(self) -> None:
         resource_uris = {resource.uri for resource in server.bootstrap().resources}
         self.assertIn("auralmind://connect-kit", resource_uris)
+        self.assertIn("auralmind://control-surface", resource_uris)
+        self.assertIn("config://maintainer-guide", resource_uris)
 
     def test_server_info_includes_version_and_supported_transports(self) -> None:
         payload = json.loads(server.get_server_info())
@@ -79,6 +81,7 @@ class DiscoverySmokeTests(unittest.TestCase):
             params = example.get("params", {})
             name = params.get("name")
             self.assertIn(name, tool_names)
+        self.assertIn("plan_mastering_strategy", tool_names)
 
     def test_upload_model_rejects_missing_or_conflicting_payloads(self) -> None:
         with self.assertRaises(ValidationError):
@@ -99,6 +102,13 @@ class DiscoverySmokeTests(unittest.TestCase):
             workflow_payload["recommended_first_path"],
             packet.recommended_first_path,
         )
+
+    def test_contracts_include_control_profile_and_strategy_models(self) -> None:
+        payload = json.loads(server.get_contracts_resource())
+        self.assertIn("plan_mastering_strategy", payload["tools"])
+        self.assertIn("MasteringControlProfile", payload["models"])
+        self.assertIn("StrategyPlanIn", payload["models"])
+        self.assertIn("StrategyPlanOut", payload["models"])
 
     @staticmethod
     def _run_async(awaitable):
