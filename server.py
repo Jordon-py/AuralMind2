@@ -889,16 +889,14 @@ def _build_connect_packet(preview_limit: int = CONNECT_PREVIEW_LIMIT) -> Connect
     recommended = "register_from_data" if catalog else "upload_then_master"
 
     workflow_steps = [
-        "1. get_connect_packet or read auralmind://connect-kit",
-        "2. list_data_audio",
-        "3. register_audio_from_path",
-        "4. analyze_audio",
-        "5. plan_mastering_strategy or propose_master_settings",
-        "6. run_master_job (or master_closed_loop)",
-        "7. job_status + job_result + read_artifact",
+        "1. Discover: get_connect_packet or read auralmind://connect-kit, then bootstrap when contracts are unknown",
+        "2. Ingest or resume: list_data_audio + register_audio_from_path, upload_init -> upload_chunk -> upload_finalize, or continue from an existing aud_*/art_* handle",
+        "3. Diagnose: analyze_audio on the current source or rendered artifact",
+        "4. Plan: use plan_mastering_strategy for semantic goals or propose_master_settings for explicit settings",
+        "5. Execute: run_master_job, master_audio, or master_closed_loop",
+        "6. Evaluate: job_status + job_result, then analyze_audio or compare_audio_metrics on returned artifacts",
+        "7. Intervene if needed: semantic_a_b_mastering, start_interactive_mastering, analyze_and_optimize_governor, ai_stem_remix, or creative DSP tools before re-analyzing and finalizing",
     ]
-    if not catalog:
-        workflow_steps.insert(2, "3. upload_init -> upload_chunk -> upload_finalize")
 
     example_calls: Dict[str, Any] = {
         "list_data_audio": {},
@@ -931,6 +929,10 @@ def _build_connect_packet(preview_limit: int = CONNECT_PREVIEW_LIMIT) -> Connect
         },
         "job_status": {"job_id": "job_1234567890ab"},
         "job_result": {"job_id": "job_1234567890ab"},
+        "compare_audio_metrics": {
+            "audio_id_a": "aud_1234567890ab",
+            "audio_id_b": "art_1234567890ab",
+        },
         "master_closed_loop": {
             "audio_id": "aud_1234567890ab",
             "goal": "Streaming-ready, clear and punchy",
@@ -939,6 +941,22 @@ def _build_connect_packet(preview_limit: int = CONNECT_PREVIEW_LIMIT) -> Connect
                 "spatial_width": 0.3,
                 "movement_amount": 0.2,
             },
+        },
+        "semantic_a_b_mastering": {
+            "audio_id": "aud_1234567890ab",
+            "preset_a": "hi_fi_streaming",
+            "preset_b": "cinematic",
+        },
+        "start_interactive_mastering": {
+            "audio_id": "aud_1234567890ab",
+            "preset_name": "hi_fi_streaming",
+        },
+        "analyze_and_optimize_governor": {
+            "audio_id": "aud_1234567890ab",
+            "preset_name": "hi_fi_streaming",
+        },
+        "ai_stem_remix": {
+            "audio_id": "aud_1234567890ab",
         },
     }
     if not catalog:
@@ -2449,7 +2467,9 @@ def get_connect_kit_resource() -> str:
             "Read this resource immediately after connect.",
             "Use `register_audio_from_path` for server-side files.",
             "Use `upload_init/upload_chunk/upload_finalize` if no songs are present.",
+            "Any current `aud_*` or `art_*` handle can re-enter the workflow at the diagnose step.",
             "Use `plan_mastering_strategy` when the mastering goal starts as natural language.",
+            "Use targeted intervention tools when a rendered pass needs comparison or one focused correction.",
         ],
         "packet": packet.model_dump(),
     }
@@ -2535,17 +2555,18 @@ async def on_connect_prompt() -> list[Message]:
     preview_names = ", ".join(song.filename for song in packet.songs_preview[:5]) if packet.songs_preview else "None"
     if packet.total_songs > 0:
         flow_hint = (
-            "1) call `get_connect_packet` or read `auralmind://connect-kit` "
-            "2) call `list_data_audio` "
-            "3) call `register_audio_from_path` using one preview filename "
-            "4) call `analyze_audio` "
-            "5) call `plan_mastering_strategy` or `propose_master_settings` "
-            "6) call `run_master_job` (or `master_closed_loop`)."
+            "Checkpoint loop: 1) call `get_connect_packet` or read `auralmind://connect-kit` "
+            "2) call `list_data_audio` and `register_audio_from_path`, or continue from an existing `aud_*` or `art_*` handle "
+            "3) call `analyze_audio` "
+            "4) choose `plan_mastering_strategy`, `propose_master_settings`, or a focused intervention branch "
+            "5) render with `run_master_job`, `master_audio`, or `master_closed_loop` "
+            "6) evaluate with `job_result`, `analyze_audio`, or `compare_audio_metrics` "
+            "7) if the pass is close, branch into `semantic_a_b_mastering`, `start_interactive_mastering`, `analyze_and_optimize_governor`, or `ai_stem_remix`."
         )
     else:
         flow_hint = (
             "No songs found in `data/`. "
-            "Use upload flow: `upload_init` -> `upload_chunk` -> `upload_finalize`, then `analyze_audio`, `plan_mastering_strategy`, and `run_master_job`."
+            "Use upload flow: `upload_init` -> `upload_chunk` -> `upload_finalize`, then `analyze_audio`, choose plan or intervention tools, render, evaluate, and re-enter from the returned `aud_*` or `art_*` handles as needed."
         )
     return [
         Message(
@@ -3153,7 +3174,7 @@ def upload_status(
     ctx: Context = None,
 ) -> UploadStatusOut:
     """Read resumable upload status."""
-    if not UPLOAD_ID_RE.match(upload_id):
+    if not UPLOAD_ID_RE.match(upload_id = str):
         raise ValueError("invalid_upload_id")
     _, session_dir = _get_session_info(ctx)
     with _UPLOAD_LOCK:

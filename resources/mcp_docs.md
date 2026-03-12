@@ -1,6 +1,6 @@
 # AuralMind2 MCP Operator Guide
 
-Last updated: March 11, 2026
+Last updated: March 12, 2026
 
 This document is written for MCP clients, orchestration agents, and LLMs driving AuralMind2.
 
@@ -10,16 +10,37 @@ This document is written for MCP clients, orchestration agents, and LLMs driving
 - Session state is isolated. Do not assume artifacts from one client session exist in another.
 - Use contracts from `auralmind://contracts` instead of guessing payload shapes.
 - Prefer semantic planning first, raw overrides second.
+- Treat mastering as a checkpointed loop: discover, diagnose, plan, execute, evaluate, intervene, finalize.
 
-## Fast start
+## Workflow Selector
+
+Use this table to choose the smallest workflow branch that fits the current moment.
+This is the Tool Decision Matrix for common mastering situations.
+
+| Situation or signal | Primary tools | Why this branch exists | Default next step |
+|---|---|---|---|
+| New session or unknown server state | `bootstrap`, `get_connect_packet`, `auralmind://connect-kit`, `auralmind://contracts` | Discover live capabilities before building payloads | Diagnose |
+| New song plus a vague goal | `register_audio_from_path` or upload flow, `analyze_audio`, `plan_mastering_strategy` | Turn measured audio plus qualitative intent into executable settings | Execute |
+| Exact settings already known | `register_audio_from_path` or upload flow, `propose_master_settings`, `run_master_job` or `master_audio` | Validate explicit settings before rendering | Evaluate |
+| User wants automation | `register_audio_from_path` or upload flow, `master_closed_loop` | Let the server plan, render, score, and optionally retune | Evaluate or Finalize |
+| Unsure between two directions | `semantic_a_b_mastering` | Render two candidate directions instead of guessing | Evaluate |
+| The current pass is close but needs final feel tweaks | `start_interactive_mastering`, `commit_interactive_mastering` | Refine a nearly-finished pass with one focused second stage | Evaluate or Finalize |
+| Mix balance complaint such as buried vocals or dominant bass | `ai_stem_remix` | Derive justified `stem_gains_db` guidance from stem loudness | Plan or Execute |
+| Loudness versus punch tension or crest-factor concern | `analyze_and_optimize_governor` | Tune governor depth and GR ceiling before rerendering | Plan or Execute |
+| You already have a current `aud_*` or `art_*` handle | `analyze_audio`, optional `compare_audio_metrics` | Resume the workflow from the current state without re-uploading | Plan, Intervene, or Finalize |
+
+## Default Path
+
+This is the default path for a new song, not the only valid path:
 
 1. Call `bootstrap`.
-2. Read `auralmind://control-surface`.
-3. Register or upload audio.
-4. Call `analyze_audio`.
-5. Call `plan_mastering_strategy`.
+2. Register or upload audio.
+3. Call `analyze_audio`.
+4. Call `plan_mastering_strategy`.
+5. Optionally call `propose_master_settings`.
 6. Execute with `run_master_job`, `master_audio`, or `master_closed_loop`.
-7. Retrieve outputs with `job_result` and `read_artifact`.
+7. Evaluate with `job_result`, `analyze_audio`, `compare_audio_metrics`, and `read_artifact`.
+8. If the pass is close but not done, choose one intervention branch and then re-analyze.
 
 ## Canonical call recipes
 
@@ -76,7 +97,9 @@ This document is written for MCP clients, orchestration agents, and LLMs driving
 }
 ```
 
-### Analyze source audio
+### Analyze the current source or rendered master
+
+`analyze_audio` accepts any current `aud_*` or analyzable `art_*` handle in the session.
 
 ```json
 {
@@ -185,6 +208,18 @@ This document is written for MCP clients, orchestration agents, and LLMs driving
 }
 ```
 
+### Compare two handles before choosing the next move
+
+```json
+{
+  "name": "compare_audio_metrics",
+  "arguments": {
+    "audio_id_a": "aud_1234567890ab",
+    "audio_id_b": "art_1234567890ab"
+  }
+}
+```
+
 ### Read artifact bytes
 
 ```json
@@ -197,23 +232,6 @@ This document is written for MCP clients, orchestration agents, and LLMs driving
   }
 }
 ```
-
-## Control profile guidance
-
-The bounded `control_profile` is the preferred deep-control surface for LLMs.
-
-- `spatial_width`
-  Negative tightens the image, positive widens it.
-- `brightness_tilt`
-  Negative darkens/smooths, positive brightens/opens.
-- `harshness_control`
-  Negative relaxes fatigue protection, positive increases it.
-- `movement_amount`
-  Negative restrains motion, positive adds lift and animation.
-- `low_end_focus`
-  Negative lightens the low end, positive tightens and emphasizes it.
-
-Use `auralmind://control-surface` for the exact range and precedence rules.
 
 ## Closed-loop mastering
 
@@ -235,16 +253,117 @@ Use `master_closed_loop` when the goal is semantic and you want the server to pl
 }
 ```
 
-## Advanced AI tools
+## Intervention recipes
 
-- `start_interactive_mastering`
-  Render a first pass, inspect returned metrics, then finalize with `commit_interactive_mastering`.
+Use these branches when the current pass needs one targeted decision rather than a full restart.
+
+### Compare two mastering directions
+
+```json
+{
+  "name": "semantic_a_b_mastering",
+  "arguments": {
+    "audio_id": "aud_1234567890ab",
+    "preset_a": "hi_fi_streaming",
+    "preset_b": "cinematic"
+  }
+}
+```
+
+### Start an interactive finishing pass
+
+```json
+{
+  "name": "start_interactive_mastering",
+  "arguments": {
+    "audio_id": "aud_1234567890ab",
+    "preset_name": "hi_fi_streaming"
+  }
+}
+```
+
+```json
+{
+  "name": "commit_interactive_mastering",
+  "arguments": {
+    "session_token": "art_1234567890ab",
+    "warmth": 0.35,
+    "transient_boost_db": 2.2
+  }
+}
+```
+
+### Recommend governor tuning
+
+```json
+{
+  "name": "analyze_and_optimize_governor",
+  "arguments": {
+    "audio_id": "aud_1234567890ab",
+    "preset_name": "hi_fi_streaming"
+  }
+}
+```
+
+### Analyze stems for balance guidance
+
+```json
+{
+  "name": "ai_stem_remix",
+  "arguments": {
+    "audio_id": "aud_1234567890ab"
+  }
+}
+```
+
+## Re-entry Points
+
+Any current `aud_*` or `art_*` handle can be the start of a new decision cycle. You do not need to restart from upload when the user is already working from a source or rendered artifact.
+
+Use this loop for midstream work:
+
+`analyze -> compare if needed -> intervene -> re-analyze -> commit/finalize`
+
+Common re-entry recipes:
+
+1. Raw source audio:
+   `register or upload -> analyze_audio -> plan_mastering_strategy -> execute`
+2. Finished master artifact:
+   `analyze_audio -> compare_audio_metrics if a baseline exists -> intervene or finalize`
+3. Complaint after first render:
+   `analyze_audio -> choose one focused intervention -> re-analyze -> finalize or plan again`
+4. Comparison request:
+   `semantic_a_b_mastering or compare_audio_metrics -> evaluate -> finalize or intervene`
+
+## Control profile guidance
+
+The bounded `control_profile` is the preferred deep-control surface for LLMs.
+
+- `spatial_width`
+  Negative tightens the image, positive widens it.
+- `brightness_tilt`
+  Negative darkens or smooths, positive brightens or opens.
+- `harshness_control`
+  Negative relaxes fatigue protection, positive increases it.
+- `movement_amount`
+  Negative restrains motion, positive adds lift and animation.
+- `low_end_focus`
+  Negative lightens the low end, positive tightens and emphasizes it.
+
+Use `auralmind://control-surface` for the exact range and precedence rules.
+
+## Branch guidance for advanced tools
+
 - `semantic_a_b_mastering`
-  Compare two presets in parallel.
+  Use when the best preset or sonic direction is uncertain.
+- `start_interactive_mastering` plus `commit_interactive_mastering`
+  Use when a pass is already close and only needs final warmth or transient adjustments.
 - `analyze_and_optimize_governor`
-  Recommend governor search depth and GR ceiling from crest factor.
+  Use when loudness, crest factor, and punch are in tension.
 - `ai_stem_remix`
-  Use Demucs to inspect stem loudness relationships and suggest stem gain overrides.
+  Use when the issue sounds like a mix-balance problem rather than a pure mastering problem.
+- `apply_musical_eq`, `apply_tempo_dynamics`, `apply_harmonic_excitation`
+  Use for bounded tone, groove, or color interventions on the current artifact, then re-analyze.
 
 ## Troubleshooting
 
@@ -265,4 +384,6 @@ Use `master_closed_loop` when the goal is semantic and you want the server to pl
 - Use `plan_mastering_strategy` unless the user already gave exact mastering parameters.
 - Use `propose_master_settings` before `run_master_job` when editing settings programmatically.
 - Prefer `control_profile` over large unbounded raw-DSP surfacing.
+- Re-analyze after every intervention before stacking another one.
+- Use only one targeted intervention branch at a time.
 - Read `auralmind://contracts` and `auralmind://control-surface` instead of inferring hidden rules.

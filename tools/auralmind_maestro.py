@@ -2944,6 +2944,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="Override preset target LUFS (integrated). Example: -12.0")
     p.add_argument("--ceiling", type=float, default=None,
                    help="Override limiter ceiling (dBFS). Example: -1.0 (recommended for streaming)")
+    p.add_argument("--governor-steps", type=int, default=None,
+                   help="Override governor binary-search steps (e.g., 5).")
+    p.add_argument("--governor-gr-limit", type=float, default=None,
+                   help="Override governor gain-reduction ceiling in dB (e.g., -1.8).")
     p.add_argument("--limiter", choices=["v1", "v2"], default="v2",
                    help="Limiter engine override (v2 is more transparent / stable).")
     p.add_argument("--no-limiter", action="store_true",
@@ -3037,6 +3041,10 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         updates["target_lufs"] = float(args.target_lufs)
     if args.ceiling is not None:
         updates["ceiling_dbfs"] = float(args.ceiling)
+    if args.governor_steps is not None:
+        updates["governor_search_steps"] = int(args.governor_steps)
+    if args.governor_gr_limit is not None:
+        updates["governor_gr_limit_db"] = float(args.governor_gr_limit)
     if args.limiter is not None:
         updates["limiter_mode"] = str(args.limiter)
     if args.no_limiter:
