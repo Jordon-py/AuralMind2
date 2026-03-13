@@ -1,7 +1,7 @@
-# Exported from Render on 2026-02-27T13:56:26Z
+# Exported from Render on 2026-03-11T09:41:00Z
 version: "1"
 projects:
-- name: AuralMind2
+- name: My project
   environments:
   - name: Production
     services:
@@ -12,13 +12,7 @@ projects:
       plan: free
       envVars:
       - key: PORT
-        sync: true
-      - key: ACTIVE_TRANSPORT
-        value: streamable-http
-      - key: MCP_HOST
-        value: 0.0.0.0
-      - key: MCP_PATH
-        value: /mcp
+        sync: false
       region: oregon
       buildCommand: pip install -r requirements.txt
       startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT

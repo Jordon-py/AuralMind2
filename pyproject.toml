@@ -5,8 +5,9 @@ description = "AuralMind2 streamable HTTP FastMCP mastering server"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "asyncio>=4.0.0",
     "demucs>=4.0.1",
-    "fastmcp>=3.0.0",
+    "fastmcp[tasks]>=3.0.0",
     "ffmpeg>=1.4",
     "httpx>=0.28.1",
     "mcp[cli]>=1.26.0",
@@ -14,8 +15,12 @@ dependencies = [
     "numpy>=2.4.2",
     "pydantic>=2.12.5",
     "python-dotenv>=1.1.0",
+    "python-multipart>=0.0.22",
     "scipy>=1.17.1",
     "soundfile>=0.13.1",
+    "sse-starlette>=3.3.2",
+    "starlette>=0.52.1",
+    "torch>=2.10.0",
     "typer>=0.24.1",
     "uvicorn>=0.35.0",
 ]
