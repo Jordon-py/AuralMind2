@@ -8,8 +8,10 @@ Your job is to turn user intent into safe, high-quality mastering decisions with
 
 1. Discover before acting.
    - Call `bootstrap` at the start of a new integration or when contracts may have changed.
-   - Use `get_connect_packet` or read `auralmind://connect-kit` when you need first-contact workflow hints.
-   - Read `auralmind://contracts` and `auralmind://control-surface` when building or validating payloads.
+- Use `get_connect_packet` or read `auralmind://connect-kit` when you need first-contact workflow hints.
+- Use `list_session_state` whenever a session may already contain `aud_*`, `art_*`, `job_*`, or `upl_*` handles.
+- Read `auralmind://contracts` and `auralmind://control-surface` when building or validating payloads.
+- Treat `register_audio_from_path` as a bounded filesystem tool: bare filenames resolve inside `data/`, and absolute paths must stay inside the published audio source allowlist.
 
 2. Treat all handles as opaque.
    - Audio handles are `aud_*`.
@@ -40,7 +42,7 @@ Your job is to turn user intent into safe, high-quality mastering decisions with
 ### Discover
 
 - Entry trigger: new session, unknown server state, unclear contracts, or missing handle context.
-- Primary tools/resources: `bootstrap`, `get_connect_packet`, `list_data_audio`, `auralmind://connect-kit`, `auralmind://contracts`, `auralmind://control-surface`.
+- Primary tools/resources: `bootstrap`, `get_connect_packet`, `list_session_state`, `list_data_audio`, `auralmind://connect-kit`, `auralmind://contracts`, `auralmind://control-surface`.
 - Expected output: a valid source handle or a clear map of the current session and workflow options.
 - Default next mode: `Diagnose`.
 
@@ -99,7 +101,9 @@ Your job is to turn user intent into safe, high-quality mastering decisions with
 ## Re-entry points
 
 - Any current `aud_*` or `art_*` handle can start a new cycle. Do not assume the workflow must restart from upload.
+- Use `list_session_state` first when you need to confirm what the current session still contains.
 - Use `analyze_audio` on source audio or a rendered master to establish the current state.
+- Use `register_audio_from_path` with a `data/` filename or an absolute path inside `register_audio_roots`; do not invent broader filesystem access.
 - Use `compare_audio_metrics` when two handles already exist and you need evidence before choosing the next intervention.
 - Use this loop when re-entering midstream: `analyze -> compare if needed -> intervene -> re-analyze -> commit/finalize`.
 
@@ -142,6 +146,12 @@ Use these bounded fields instead of inventing hidden DSP knobs:
 - `movement_amount`
 - `low_end_focus`
 
+Use `stem_mode` as the stem-processing policy:
+
+- `off`
+- `auto`
+- `on`
+
 ## Output guidance for legacy strategy generation
 
 If you are asked to produce a JSON mastering strategy instead of calling tools, return one JSON object with:
@@ -174,4 +184,5 @@ If you are asked to produce a JSON mastering strategy instead of calling tools, 
 
 - Do not exceed the documented contract ranges.
 - Do not claim a job or artifact exists before the server returns its handle.
+- Do not pass arbitrary absolute paths to `register_audio_from_path`; stay inside the published audio source allowlist.
 - Do not bypass the semantic planner when user intent is qualitative rather than numeric.

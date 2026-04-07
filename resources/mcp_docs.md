@@ -8,6 +8,7 @@ This document is written for MCP clients, orchestration agents, and LLMs driving
 
 - Handles are opaque: `aud_*`, `art_*`, `job_*`, and `upl_*` are server-issued IDs.
 - Session state is isolated. Do not assume artifacts from one client session exist in another.
+- Use `list_session_state` to inspect the current session before assuming a remembered handle still exists.
 - Use contracts from `auralmind://contracts` instead of guessing payload shapes.
 - Prefer semantic planning first, raw overrides second.
 - Treat mastering as a checkpointed loop: discover, diagnose, plan, execute, evaluate, intervene, finalize.
@@ -19,7 +20,7 @@ This is the Tool Decision Matrix for common mastering situations.
 
 | Situation or signal | Primary tools | Why this branch exists | Default next step |
 |---|---|---|---|
-| New session or unknown server state | `bootstrap`, `get_connect_packet`, `auralmind://connect-kit`, `auralmind://contracts` | Discover live capabilities before building payloads | Diagnose |
+| New session or unknown server state | `bootstrap`, `get_connect_packet`, `list_session_state`, `auralmind://connect-kit`, `auralmind://contracts` | Discover live capabilities and current session state before building payloads | Diagnose |
 | New song plus a vague goal | `register_audio_from_path` or upload flow, `analyze_audio`, `plan_mastering_strategy` | Turn measured audio plus qualitative intent into executable settings | Execute |
 | Exact settings already known | `register_audio_from_path` or upload flow, `propose_master_settings`, `run_master_job` or `master_audio` | Validate explicit settings before rendering | Evaluate |
 | User wants automation | `register_audio_from_path` or upload flow, `master_closed_loop` | Let the server plan, render, score, and optionally retune | Evaluate or Finalize |
@@ -34,13 +35,14 @@ This is the Tool Decision Matrix for common mastering situations.
 This is the default path for a new song, not the only valid path:
 
 1. Call `bootstrap`.
-2. Register or upload audio.
-3. Call `analyze_audio`.
-4. Call `plan_mastering_strategy`.
-5. Optionally call `propose_master_settings`.
-6. Execute with `run_master_job`, `master_audio`, or `master_closed_loop`.
-7. Evaluate with `job_result`, `analyze_audio`, `compare_audio_metrics`, and `read_artifact`.
-8. If the pass is close but not done, choose one intervention branch and then re-analyze.
+2. If the session may already be active, call `list_session_state`.
+3. Register or upload audio.
+4. Call `analyze_audio`.
+5. Call `plan_mastering_strategy`.
+6. Optionally call `propose_master_settings`.
+7. Execute with `run_master_job`, `master_audio`, or `master_closed_loop`.
+8. Evaluate with `job_result`, `analyze_audio`, `compare_audio_metrics`, and `read_artifact`.
+9. If the pass is close but not done, choose one intervention branch and then re-analyze.
 
 ## Canonical call recipes
 
@@ -53,13 +55,26 @@ This is the default path for a new song, not the only valid path:
 }
 ```
 
-### Register audio from `data/`
+### Register audio from `data/` or an allowed import root
 
 ```json
 {
   "name": "register_audio_from_path",
   "arguments": {
     "path": "song.wav"
+  }
+}
+```
+
+Bare filenames resolve inside `data/`.
+Absolute paths are allowed when they stay inside a configured audio source root.
+Local desktop defaults include `~/Downloads`, and `config://server-info` publishes the active `register_audio_roots`.
+
+```json
+{
+  "name": "register_audio_from_path",
+  "arguments": {
+    "path": "C:/Users/goku/Downloads/song.wav"
   }
 }
 ```
@@ -135,6 +150,12 @@ This is the default path for a new song, not the only valid path:
 - resolved `MasterSettings`
 - reasoning
 - warnings
+
+`stem_mode` is the bounded stem-processing policy:
+
+- `off`: never run Demucs for this render.
+- `auto`: premium default; only run stems when the request or source state justifies it.
+- `on`: force stem processing for the render.
 
 ### Validate or modify explicit settings
 
@@ -381,6 +402,7 @@ Use `auralmind://control-surface` for the exact range and precedence rules.
 ## Strong recommendations for LLM clients
 
 - Call `bootstrap` at the beginning of a new integration or test session.
+- Prefer the filename returned by `list_data_audio` when the source is already in `data/`; otherwise use an absolute path only when it is inside `register_audio_roots`.
 - Use `plan_mastering_strategy` unless the user already gave exact mastering parameters.
 - Use `propose_master_settings` before `run_master_job` when editing settings programmatically.
 - Prefer `control_profile` over large unbounded raw-DSP surfacing.

@@ -6,7 +6,7 @@ AuralMind2 is a FastMCP mastering server for remote MCP clients and agentic musi
 
 ## What this server exposes
 
-- `34` tools for ingest, analysis, semantic planning, mastering, artifact access, and advanced AI-assisted workflows
+- `35` tools for ingest, analysis, semantic planning, session-state discovery, mastering, artifact access, and advanced AI-assisted workflows
 - `10` resources for onboarding, contracts, presets, metrics, control-surface guidance, and maintainer documentation
 - `4` prompts for connect-time guidance and legacy strategy generation
 - Strict Pydantic v2 contracts for every request/response shape published through `auralmind://contracts`
@@ -30,6 +30,7 @@ Canonical runtime files:
 
 - Every MCP client session gets an isolated storage directory under `MAESTRO_SESSION_DIR` or the system temp directory.
 - Uploaded or registered source audio becomes an opaque `aud_*` handle.
+- `register_audio_from_path` accepts bare filenames from `data/` and absolute paths inside the audio source allowlist. Local desktop defaults include `~/Downloads`; extend with `AURALMIND_AUDIO_ROOTS`.
 - Rendered outputs, metrics JSON, tuning traces, and summaries become `art_*` handles.
 - Async mastering work is tracked with `job_*` handles.
 - Clients should treat all handles as opaque. Do not derive paths or invent IDs.
@@ -39,12 +40,13 @@ Canonical runtime files:
 ### 1. LLM-first semantic mastering
 
 1. Call `bootstrap`.
-2. Call `register_audio_from_path` or the resumable upload flow.
-3. Call `analyze_audio`.
-4. Call `plan_mastering_strategy` with `goal`, `platform`, and optional `control_profile`.
-5. Optionally call `propose_master_settings` to validate or adjust the returned settings.
-6. Call `run_master_job` or `master_audio`.
-7. Use `job_status`, `job_result`, and `read_artifact` to retrieve outputs.
+2. Call `list_session_state` if the session may already have active handles.
+3. Call `register_audio_from_path` with a filename in `data/` or an absolute path inside an allowed audio source root, or use the resumable upload flow.
+4. Call `analyze_audio`.
+5. Call `plan_mastering_strategy` with `goal`, `platform`, optional `control_profile`, and optional `stem_mode`.
+6. Optionally call `propose_master_settings` to validate or adjust the returned settings.
+7. Call `run_master_job` or `master_audio`.
+8. Use `job_status`, `job_result`, and `read_artifact` to retrieve outputs.
 
 ### 2. Closed-loop mastering
 
@@ -67,6 +69,7 @@ If needed, add the safe overrides:
 - `governor_search_steps`
 - `governor_gr_limit_db`
 - `stem_gains_db`
+- `stem_mode`
 
 Precedence is:
 
@@ -76,6 +79,7 @@ Precedence is:
 
 - Discovery: `bootstrap`, `capabilities`, `get_connect_packet`
 - Ingest: `list_data_audio`, `register_audio_from_path`, `upload_init`, `upload_chunk`, `upload_finalize`, `upload_audio_to_session`
+  `register_audio_from_path` accepts `data/` filenames plus absolute paths inside allowed audio source roots.
 - Analysis and planning: `analyze_audio`, `list_presets`, `plan_mastering_strategy`, `propose_master_settings`, `compare_audio_metrics`
 - Mastering execution: `run_master_job`, `job_status`, `job_result`, `master_audio`, `master_closed_loop`
 - Artifact access: `read_artifact`, `delete_artifact`
@@ -110,6 +114,7 @@ Environment variables:
 - `MCP_HOST`
 - `MCP_PATH`
 - `MAESTRO_SESSION_DIR`
+- `AURALMIND_AUDIO_ROOTS`
 - `MAX_MASTER_JOBS`
 - `UPLOAD_CHUNK_MAX_BYTES`
 

@@ -1992,6 +1992,67 @@ def gain_match_rms(y: np.ndarray, ref: np.ndarray, eps: float = 1e-9) -> np.ndar
     g = float(r_m / y_m)
     return (ensure_stereo(y) * g).astype(np.float32)
 
+
+def should_run_stem_separation(
+    y: np.ndarray,
+    sr: int,
+    preset: "Preset",
+) -> Tuple[bool, Dict[str, Any]]:
+    """
+    Decide whether HT-Demucs is worth the cost for this render.
+
+    The premium default is `auto`: only pay the stem-separation cost when
+    explicit stem gains are requested or the material looks dense enough that
+    targeted stem cleanup is likely to help.
+    """
+    mode = str(getattr(preset, "stem_mode", "auto") or "auto").lower()
+    if mode not in {"off", "auto", "on"}:
+        mode = "auto"
+
+    if mode == "off":
+        return False, {"policy": mode, "reason": "stem_mode_off"}
+    if mode == "on":
+        return True, {"policy": mode, "reason": "stem_mode_on"}
+    if not getattr(preset, "enable_stem_separation", True):
+        return False, {"policy": mode, "reason": "preset_disabled"}
+
+    requested_gains = bool(getattr(preset, "stem_gains_db", {}))
+    if requested_gains:
+        return True, {"policy": mode, "reason": "stem_gains_requested"}
+
+    features = analyze_track_features(y, sr)
+    crest = float(features.get("crest_db", 10.0))
+    centroid = float(features.get("centroid_hz", 2500.0))
+    corr = float(features.get("corr_hi", 0.2))
+    preset_name = str(getattr(preset, "name", "")).lower()
+    congestion_signals = int(crest < 8.8) + int(centroid > 4300.0) + int(corr < 0.05)
+    aggressive_preset = preset_name in {"competitive_trap", "radio_loud", "club", "club_clean"}
+
+    if congestion_signals >= 2:
+        return True, {
+            "policy": mode,
+            "reason": "auto_congested_program",
+            "crest_db": crest,
+            "centroid_hz": centroid,
+            "corr_hi": corr,
+        }
+    if aggressive_preset and congestion_signals >= 1 and crest < 9.2:
+        return True, {
+            "policy": mode,
+            "reason": "competitive_program_with_congestion",
+            "crest_db": crest,
+            "centroid_hz": centroid,
+            "corr_hi": corr,
+        }
+
+    return False, {
+        "policy": mode,
+        "reason": "auto_not_needed",
+        "crest_db": crest,
+        "centroid_hz": centroid,
+        "corr_hi": corr,
+    }
+
 def demucs_separate_stems(
     y: np.ndarray,
     sr: int,
@@ -2106,6 +2167,7 @@ class Preset:
     name: str
     sr: int = 48000
     bit_depth: str = "float32"  # Options: "float32", "float64"
+    stem_mode: str = "auto"  # off | auto | on
     target_lufs: float = -12.3
     ceiling_dbfs: float = -1.0
 
@@ -2187,6 +2249,7 @@ class Preset:
 
     # Air Motion 3D (correlation-guarded air-band depth)
     enable_air_motion: bool = True
+    enable_masking_eq: bool = True
     air_motion_rate_hz: float = 0.35
     air_motion_depth_ms: float = 0.15
     air_motion_mix: float = 0.12
@@ -2526,10 +2589,11 @@ def master(target_path: str, out_path: str, preset: Preset,
     # ---------------------------------------------------------------------
     # HT-Demucs stem separation (EARLY) + stem-aware pre-pass + recombine
     # ---------------------------------------------------------------------
-    stems_info: Dict[str, Any] = {"enabled": False}
-    if preset.enable_stem_separation:
+    use_stems, stem_decision = should_run_stem_separation(y, sr_t, preset)
+    stems_info: Dict[str, Any] = {"enabled": False, **stem_decision}
+    if use_stems:
         if not HAS_DEMUCS:
-            stems_info = {"enabled": False, "reason": "demucs_not_installed"}
+            stems_info = {"enabled": False, **stem_decision, "reason": "demucs_not_installed"}
         else:
             try:
                 log.info("[master] stem separation started (HT-Demucs)")
@@ -2542,6 +2606,7 @@ def master(target_path: str, out_path: str, preset: Preset,
                     overlap=float(preset.demucs_overlap),
                     shifts=int(preset.demucs_shifts),
                 )
+                stems_info = {**stem_decision, **stems_info}
 
                 stems_pp: Dict[str, np.ndarray] = {}
                 for s_name, s_audio in stems.items():
@@ -2554,7 +2619,7 @@ def master(target_path: str, out_path: str, preset: Preset,
                 y = gain_match_rms(y_stem, pre_stem_ref)
 
             except Exception as e:
-                stems_info = {"enabled": False, "error": str(e)}
+                stems_info = {"enabled": False, **stem_decision, "error": str(e)}
 
     # Musical analysis: sub f0
     f0 = estimate_sub_fundamental_hz(y, sr_t)
@@ -2596,10 +2661,13 @@ def master(target_path: str, out_path: str, preset: Preset,
 
     # Dynamic masking EQ
     if preset.enable_masking_eq:
-        y = dynamic_masking_eq(
-            y, sr_t,
-            max_dip_db=float(getattr(preset, "masking_eq_max_dip_db", 1.5)),
-        )
+        try:
+            y = dynamic_masking_eq(
+                y, sr_t,
+                max_dip_db=float(getattr(preset, "masking_eq_max_dip_db", 1.5)),
+            )
+        except Exception as e:
+            log.warning("[master] dynamic_masking_eq bypassed due exception: %s", e)
 
     # De-ess (protect harshness without killing air)
     if preset.enable_deess:
@@ -2656,32 +2724,40 @@ def master(target_path: str, out_path: str, preset: Preset,
     # Air Motion 3D (correlation-guarded air-band depth enhancement)
     air_motion_info: Dict[str, Any] = {"enabled": False}
     if getattr(preset, 'enable_air_motion', False):
-        _stage_am = time.time()
-        y, air_motion_info = air_motion_3d(
-            y, sr_t,
-            rate_hz=float(getattr(preset, 'air_motion_rate_hz', 0.35)),
-            depth_ms=float(getattr(preset, 'air_motion_depth_ms', 0.15)),
-            mix=float(getattr(preset, 'air_motion_mix', 0.12)),
-            corr_floor=float(getattr(preset, 'air_motion_corr_floor', 0.82)),
-        )
-        log.info("[master] air motion 3D  enabled=%s corr=%.3f->%.3f (%.3fs)",
-                 air_motion_info.get('enabled', False),
-                 air_motion_info.get('corr_pre', 0),
-                 air_motion_info.get('corr_post', 0),
-                 time.time() - _stage_am)
+        try:
+            _stage_am = time.time()
+            y, air_motion_info = air_motion_3d(
+                y, sr_t,
+                rate_hz=float(getattr(preset, 'air_motion_rate_hz', 0.35)),
+                depth_ms=float(getattr(preset, 'air_motion_depth_ms', 0.15)),
+                mix=float(getattr(preset, 'air_motion_mix', 0.12)),
+                corr_floor=float(getattr(preset, 'air_motion_corr_floor', 0.82)),
+            )
+            log.info("[master] air motion 3D  enabled=%s corr=%.3f->%.3f (%.3fs)",
+                     air_motion_info.get('enabled', False),
+                     air_motion_info.get('corr_pre', 0),
+                     air_motion_info.get('corr_post', 0),
+                     time.time() - _stage_am)
+        except Exception as e:
+            log.warning("[master] air_motion_3d bypassed due exception: %s", e)
+            air_motion_info = {"enabled": False, "error": str(e)}
 
     if preset.enable_hooklift:
-        if bool(preset.hooklift_auto):
-            mask = build_section_lift_mask(
-                y, sr_t,
-                percentile=float(preset.hooklift_auto_percentile),
-            )
-            lifted, hinfo = hooklift(y, sr_t, mix=float(preset.hooklift_mix))
-            mask_col = mask[:, None]
-            y = (1.0 - mask_col) * y + mask_col * lifted
-            hooklift_info = {**hinfo, "auto": True, "auto_percentile": float(preset.hooklift_auto_percentile)}
-        else:
-            y, hooklift_info = hooklift(y, sr_t, mix=float(preset.hooklift_mix))
+        try:
+            if bool(preset.hooklift_auto):
+                mask = build_section_lift_mask(
+                    y, sr_t,
+                    percentile=float(preset.hooklift_auto_percentile),
+                )
+                lifted, hinfo = hooklift(y, sr_t, mix=float(preset.hooklift_mix))
+                mask_col = mask[:, None]
+                y = (1.0 - mask_col) * y + mask_col * lifted
+                hooklift_info = {**hinfo, "auto": True, "auto_percentile": float(preset.hooklift_auto_percentile)}
+            else:
+                y, hooklift_info = hooklift(y, sr_t, mix=float(preset.hooklift_mix))
+        except Exception as e:
+            log.warning("[master] hooklift bypassed due exception: %s", e)
+            hooklift_info = {"enabled": False, "error": str(e)}
 
     # Transient Sculpt (pre-limiter punch preservation)
     transient_info: Dict[str, Any] = {"enabled": False}
@@ -2905,8 +2981,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--report", default=None, help="Optional report markdown output.")
     p.add_argument("--preset", default="hi_fi_streaming", choices=list(get_presets().keys()), help="Preset name.")
-    p.add_argument("--no-stems", action="store_true", help="Disable HT-Demucs stem separation (otherwise enabled by preset).")
-    p.add_argument("--stems", action="store_true", help="Force-enable HT-Demucs stem separation (overrides preset).")
+    p.add_argument("--no-stems", action="store_true", help="Disable HT-Demucs stem separation (overrides preset stem_mode).")
+    p.add_argument("--stems", action="store_true", help="Force-enable HT-Demucs stem separation (overrides preset stem_mode).")
     p.add_argument("--demucs-model", default=None, help="Demucs model name (default from preset, e.g., htdemucs).")
     p.add_argument("--demucs-device", default="cpu", help="Demucs device: cpu or cuda (if available).")
     p.add_argument("--demucs-overlap", type=float, default=None, help="Demucs overlap (0.0-0.99).")
@@ -3000,8 +3076,10 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
 
     # Stem separation overrides.
     if args.no_stems:
+        updates["stem_mode"] = "off"
         updates["enable_stem_separation"] = False
     if args.stems:
+        updates["stem_mode"] = "on"
         updates["enable_stem_separation"] = True
     if args.demucs_model is not None:
         updates["demucs_model"] = args.demucs_model

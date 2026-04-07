@@ -59,6 +59,7 @@ VERSION = "0.1.0"
 ACTIVE_TRANSPORT_ENV = "ACTIVE_TRANSPORT"
 DEFAULT_ACTIVE_TRANSPORT = "streamable-http"
 SUPPORTED_TRANSPORTS = ("stdio", "streamable-http")
+AUDIO_SOURCE_ROOTS_ENV = "AURALMIND_AUDIO_ROOTS"
 _TRANSPORT_ALIASES = {
     "http": "streamable-http",
     "streamable_http": "streamable-http",
@@ -75,6 +76,7 @@ HTTP_APP_TRANSPORT = "streamable-http"
 Platform = Literal["spotify", "apple_music", "youtube", "soundcloud", "club"]
 # prefer float64 for audio processing and float32 for audio output
 BitDepth = Literal["float32", "float64"]
+StemMode = Literal["off", "auto", "on"]
 JobStatus = Literal["queued", "running", "done", "error"]
 
 # ---------------------------------------------------------------------------
@@ -90,9 +92,36 @@ mcp = FastMCP(
 DATA_DIR = os.path.join(ROOT_DIR, "data")
 DEFAULT_STORAGE_DIR = os.path.join(tempfile.gettempdir(), "maestro_sessions")
 STORAGE_DIR = os.path.abspath(os.environ.get("MAESTRO_SESSION_DIR", DEFAULT_STORAGE_DIR))
+DEFAULT_AUDIO_SOURCE_ROOTS = (
+    os.path.join(os.path.expanduser("~"), "Downloads"),
+)
 os.makedirs(STORAGE_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
 DATA_DIR_REAL = os.path.realpath(DATA_DIR)
+
+
+def _parse_audio_source_roots(raw: Optional[str]) -> Tuple[str, ...]:
+    roots: List[str] = [DATA_DIR_REAL, *DEFAULT_AUDIO_SOURCE_ROOTS]
+    if raw:
+        roots.extend(
+            part.strip().strip('"').strip("'")
+            for part in raw.split(",")
+            if part.strip()
+        )
+
+    resolved_roots: List[str] = []
+    seen: set[str] = set()
+    for root in roots:
+        resolved = os.path.realpath(os.path.abspath(os.path.expanduser(root)))
+        key = os.path.normcase(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved_roots.append(resolved)
+    return tuple(resolved_roots)
+
+
+AUDIO_SOURCE_ROOTS = _parse_audio_source_roots(os.environ.get(AUDIO_SOURCE_ROOTS_ENV))
 
 SYSTEM_PROMPT_PATH = os.path.join(
     os.path.dirname(__file__), "resources", "system_prompt.md"
@@ -111,12 +140,12 @@ MAX_UPLOAD_BYTES = 400 * 1024 * 1024  # 400 MB after decode
 MAX_UPLOAD_B64_CHARS = int(MAX_UPLOAD_BYTES * 4 / 3) + 4
 
 BOOTSTRAP_WORKFLOW_STEPS = [
-    "Upload audio (upload_audio_to_session or register_audio_from_path)",
-    "Analyze (analyze_audio)",
-    "Select/Optimize preset (list_presets / analyze_and_optimize_governor)",
-    "Run master job (run_master_job)",
-    "Poll status (job_status)",
-    "Download result (job_result -> read_artifact)"
+    "Discover or resume state (bootstrap / list_session_state)",
+    "Ingest audio (upload_audio_to_session or register_audio_from_path)",
+    "Plan from intent (plan_mastering_strategy) or validate explicit settings (propose_master_settings)",
+    "Render (master_closed_loop / master_audio / run_master_job)",
+    "Evaluate (job_result / analyze_audio / compare_audio_metrics)",
+    "Intervene only when needed (interactive, governor, or stem tools)",
 ]
 
 BOOTSTRAP_EXAMPLE_CALLS = {
@@ -141,13 +170,151 @@ VISIBLE_MASTER_FIELDS = {
     "enable_air_motion",
     "bit_depth",
 }
-SAFE_OVERRIDE_FIELDS = {"governor_search_steps", "governor_gr_limit_db", "stem_gains_db"}
+SAFE_OVERRIDE_FIELDS = {"governor_search_steps", "governor_gr_limit_db", "stem_gains_db", "stem_mode"}
 CONTROL_PROFILE_FIELDS = {
     "spatial_width",
     "brightness_tilt",
     "harshness_control",
     "movement_amount",
     "low_end_focus",
+}
+PRESET_SEMANTICS: Dict[str, Dict[str, Any]] = {
+    "hi_fi_streaming": {
+        "tone": "open and polished",
+        "width_bias": "wide",
+        "movement_bias": "restrained",
+        "best_for": ["organic mixes", "streaming-first masters", "dynamic material", "natural vocal polish"],
+        "avoid_when": ["maximum loudness is the only goal", "festival/club aggression", "hyper-dense trap finish"],
+        "stem_default": "auto",
+    },
+    "radio_loud": {
+        "tone": "forward and commercial",
+        "width_bias": "wide",
+        "movement_bias": "balanced",
+        "best_for": ["pop vocals", "hook-led records", "commercial loudness", "radio-style finish"],
+        "avoid_when": ["very dynamic acoustic material", "dark cinematic ambience", "minimal-processing goals"],
+        "stem_default": "auto",
+    },
+    "cinematic": {
+        "tone": "smooth and dimensional",
+        "width_bias": "wide",
+        "movement_bias": "restrained",
+        "best_for": ["cinematic width", "atmospheric production", "depth-first masters", "dynamic soundtracks"],
+        "avoid_when": ["club loudness targets", "hard-edged trap impact", "ultra-dense radio loudness"],
+        "stem_default": "auto",
+    },
+    "club": {
+        "tone": "dense and energetic",
+        "width_bias": "wide",
+        "movement_bias": "animated",
+        "best_for": ["dancefloor energy", "club translation", "driving low end", "high-impact playback"],
+        "avoid_when": ["natural acoustic masters", "soft intimate material", "low-processing transparency"],
+        "stem_default": "auto",
+    },
+    "competitive_trap": {
+        "tone": "punchy and modern",
+        "width_bias": "wide",
+        "movement_bias": "animated",
+        "best_for": ["808-heavy mixes", "trap punch", "aggressive modern loudness", "low-end focus"],
+        "avoid_when": ["orchestral openness", "gentle acoustic material", "very soft top-end goals"],
+        "stem_default": "auto",
+    },
+    "club_clean": {
+        "tone": "clean and dense",
+        "width_bias": "wide",
+        "movement_bias": "balanced",
+        "best_for": ["club translation with cleaner top end", "dense electronic masters", "tight loud low end"],
+        "avoid_when": ["very natural dynamics", "vintage softness", "ambient cinematic breadth"],
+        "stem_default": "auto",
+    },
+}
+
+TOOL_USAGE_HINTS: Dict[str, Dict[str, str]] = {
+    "bootstrap": {
+        "best_when": "Starting a new session or when the client needs the current discovery map.",
+        "avoid_when": "You already know the tool/resource surface and only need current session state.",
+    },
+    "list_session_state": {
+        "best_when": "Re-entering a session, verifying handles, or checking which jobs, uploads, and artifacts still exist.",
+        "avoid_when": "You only need files available in data/ before registration.",
+    },
+    "list_presets": {
+        "best_when": "Choosing a preset family or comparing preset personalities before execution.",
+        "avoid_when": "The user goal is purely semantic and plan_mastering_strategy should pick the direction first.",
+    },
+    "plan_mastering_strategy": {
+        "best_when": "Use for semantic goals when the user describes the desired sound in natural language.",
+        "avoid_when": "You already have explicit settings and only need validation before rendering.",
+    },
+    "propose_master_settings": {
+        "best_when": "You already know the settings and want validation or normalization.",
+        "avoid_when": "The goal is qualitative and still needs semantic planning.",
+    },
+    "run_master_job": {
+        "best_when": "You want an async render and will poll for progress.",
+        "avoid_when": "You need the master immediately in the same call path.",
+    },
+    "master_audio": {
+        "best_when": "You want a single immediate render with resolved settings.",
+        "avoid_when": "You want the server to plan, score, and optionally retune automatically.",
+    },
+    "master_closed_loop": {
+        "best_when": "You want the server to plan, render, score, and perform one bounded retune pass.",
+        "avoid_when": "You already know the exact settings or only need one render.",
+    },
+    "start_interactive_mastering": {
+        "best_when": "A preset direction is known and you want a reviewable stage-1 pass before the final commit.",
+        "avoid_when": "You need fully automated planning or a finished one-shot render.",
+    },
+    "commit_interactive_mastering": {
+        "best_when": "Stage 1 already exists and you want to commit final bounded tweaks.",
+        "avoid_when": "There is no interactive session token from start_interactive_mastering.",
+    },
+    "semantic_a_b_mastering": {
+        "best_when": "You are choosing between two preset directions and want rendered evidence.",
+        "avoid_when": "One direction is already clearly preferred.",
+    },
+    "analyze_and_optimize_governor": {
+        "best_when": "Loudness-versus-punch tradeoffs are the main concern.",
+        "avoid_when": "The issue is mainly tonal, spatial, or mix-balance related.",
+    },
+    "ai_stem_remix": {
+        "best_when": "The complaint is about vocals, bass, drums, or bed balance.",
+        "avoid_when": "You only need broad mastering polish with no balance complaint.",
+    },
+}
+
+PRESET_SEMANTIC_OVERRIDES: Dict[str, Dict[str, str]] = {
+    "hi_fi_streaming": {
+        "tone": "open and polished",
+        "best_for": "dynamic, hi-fi, streaming-safe masters",
+        "avoid_when": "you want dense club loudness first",
+    },
+    "radio_loud": {
+        "tone": "forward and commercial",
+        "best_for": "vocal-forward pop and radio-facing impact",
+        "avoid_when": "you want the most open, low-fatigue presentation",
+    },
+    "cinematic": {
+        "tone": "wide and atmospheric",
+        "best_for": "spacious, immersive, filmic masters",
+        "avoid_when": "you need the hottest competitive loudness",
+    },
+    "club": {
+        "tone": "dense and energetic",
+        "best_for": "club translation and heavy-impact playback",
+        "avoid_when": "you want restrained movement and softer loudness",
+    },
+    "competitive_trap": {
+        "tone": "punchy and low-end driven",
+        "best_for": "808-heavy trap, rap, and assertive streaming masters",
+        "avoid_when": "you want light low end and minimal movement",
+    },
+    "club_clean": {
+        "tone": "tight and modern",
+        "best_for": "clean loud masters with disciplined club energy",
+        "avoid_when": "you want atmospheric width over focused impact",
+    },
 }
 
 PLATFORM_TARGET_RANGES: Dict[str, Tuple[float, float]] = {
@@ -264,6 +431,8 @@ class ToolCatalogEntry(StrictBaseModel):
     description: str = Field(..., description="Purpose of the tool.")
     input_model: str = Field(..., description="Name/schema of the input Pydantic model.")
     output_model: str = Field(..., description="Name/schema of the output Pydantic model.")
+    best_when: Optional[str] = Field(None, description="Short intent hint for when this tool is the best next action.")
+    avoid_when: Optional[str] = Field(None, description="Short intent hint for when another tool is a better fit.")
 
 
 class ResourceCatalogEntry(StrictBaseModel):
@@ -322,6 +491,12 @@ class PresetSummary(StrictBaseModel):
     enable_harshness_limiter: bool = Field(..., description="Harshness limiter flag.")
     enable_air_motion: bool = Field(..., description="Air motion flag.")
     bit_depth: BitDepth = Field(..., description="Default bit depth.")
+    tone: str = Field(..., description="Perceptual tone summary for LLM-facing preset selection.")
+    width_bias: str = Field(..., description="Stereo image tendency such as focused, balanced, or wide.")
+    movement_bias: str = Field(..., description="Macro-motion tendency such as restrained, balanced, or animated.")
+    best_for: List[str] = Field(..., description="Short phrases describing the musical situations this preset serves best.")
+    avoid_when: List[str] = Field(..., description="Short warnings for situations where another preset is a better first choice.")
+    stem_default: StemMode = Field(..., description="Default stem-separation policy for this preset.")
 
 
 class PresetsOut(StrictBaseModel):
@@ -367,7 +542,9 @@ class MasterSettings(StrictBaseModel):
     warmth: float = Field(0.5, ge=0.0, le=1.0, description="Warmth (0-1).")
     transient_boost_db: float = Field(1.0, ge=0.0, le=4.0, description="Transient boost.")
     enable_harshness_limiter: bool = Field(True, description="Enable harshness filter.")
+    enable_masking_eq: bool = Field(True, description="Enable dynamic masking EQ.")
     enable_air_motion: bool = Field(True, description="Enable spatial air.")
+    enable_hooklift: bool = Field(True, description="Enable section-aware hooklift.")
     bit_depth: BitDepth = Field("float32", description="Output precision.")
     control_profile: Optional[MasteringControlProfile] = Field(
         None,
@@ -386,6 +563,10 @@ class MasterSettings(StrictBaseModel):
         description="Override governor GR limit.",
     )
     stem_gains_db: Optional[Dict[str, float]] = Field(None, description="Demucs stem gain adjustments (dB).")
+    stem_mode: StemMode = Field(
+        "auto",
+        description="Stem-separation policy. off skips Demucs, auto uses a bounded heuristic, on forces stem processing.",
+    )
 
 
 class MasterRequest(MasterSettings):
@@ -428,6 +609,10 @@ class StrategyPlanIn(StrictBaseModel):
     stem_gains_db: Optional[Dict[str, float]] = Field(
         None,
         description="Optional Demucs stem gain adjustments in dB.",
+    )
+    stem_mode: Optional[StemMode] = Field(
+        None,
+        description="Optional stem-separation policy override. Use auto for smart gating, on to force stems, or off to stay full-mix only.",
     )
 
 
@@ -493,6 +678,10 @@ class ClosedLoopRequest(StrictBaseModel):
         description="Override governor GR limit.",
     )
     stem_gains_db: Optional[Dict[str, float]] = Field(None, description="Demucs stem gain adjustments (dB).")
+    stem_mode: Optional[StemMode] = Field(
+        None,
+        description="Optional stem-separation policy override. Use auto for smart gating, on to force stems, or off to stay full-mix only.",
+    )
 
 
 class TuneDelta(StrictBaseModel):
@@ -508,6 +697,52 @@ class ClosedLoopResult(StrictBaseModel):
     artifacts: List[str] = Field(..., description="List of generated artifact handles.")
     runner_summary_id: str = Field(..., description="Handle for the runner summary JSON.")
     metrics_final: AudioMetrics
+
+
+class SessionArtifactState(StrictBaseModel):
+    handle: str = Field(..., description="Artifact or audio handle.")
+    kind: str = Field(..., description="Stored artifact kind such as audio, mastered_audio, metrics, or trace.")
+    status: str = Field(..., description="Current availability status.")
+    filename: str = Field(..., description="Stored filename.")
+    media_type: str = Field(..., description="MIME type.")
+    size_bytes: int = Field(..., description="Stored size in bytes.")
+    created_at: str = Field(..., description="UTC ISO-8601 creation timestamp.")
+
+
+class SessionJobState(StrictBaseModel):
+    handle: str = Field(..., description="Job handle.")
+    kind: str = Field("master_job", description="Session state item kind.")
+    status: JobStatus = Field(..., description="Current job status.")
+    progress: int = Field(..., ge=0, le=100, description="Progress percentage.")
+    audio_id: str = Field(..., description="Source audio handle associated with the job.")
+    created_at: str = Field(..., description="UTC ISO-8601 creation timestamp.")
+    updated_at: str = Field(..., description="UTC ISO-8601 last-update timestamp.")
+
+
+class SessionUploadState(StrictBaseModel):
+    handle: str = Field(..., description="Upload handle.")
+    kind: str = Field("upload", description="Session state item kind.")
+    status: str = Field(..., description="Current upload status.")
+    filename: str = Field(..., description="Sanitized filename.")
+    total_bytes: int = Field(..., description="Expected total byte count.")
+    received_bytes: int = Field(..., description="Bytes received so far.")
+    next_index: int = Field(..., description="Next chunk index expected.")
+    created_at: str = Field(..., description="UTC ISO-8601 creation timestamp.")
+    updated_at: str = Field(..., description="UTC ISO-8601 last-update timestamp.")
+
+
+class SessionStateCounts(StrictBaseModel):
+    artifacts: int = Field(..., description="Number of audio/artifact handles in the session.")
+    jobs: int = Field(..., description="Number of jobs tracked for the session.")
+    uploads: int = Field(..., description="Number of active uploads tracked for the session.")
+
+
+class SessionStateOut(StrictBaseModel):
+    session_key: str = Field(..., description="Opaque identifier for the current MCP session.")
+    artifacts: List[SessionArtifactState] = Field(..., description="Current session audio and artifact handles.")
+    jobs: List[SessionJobState] = Field(..., description="Current session jobs.")
+    uploads: List[SessionUploadState] = Field(..., description="Current resumable uploads.")
+    counts: SessionStateCounts = Field(..., description="Item counts for the current session.")
 
 
 class FileReadIn(StrictBaseModel):
@@ -616,7 +851,10 @@ class ConnectPacketOut(StrictBaseModel):
 
 
 class RegisterAudioPathIn(StrictBaseModel):
-    path: str = Field(..., description="Path to an audio file within the data directory.")
+    path: str = Field(
+        ...,
+        description="Path to an audio file in data/ or an allowed audio source root.",
+    )
 
 
 class RegisterAudioResult(StrictBaseModel):
@@ -711,7 +949,15 @@ class HarmonicExcitationOut(StrictBaseModel):
 
 class StartInteractiveMasteringIn(StrictBaseModel):
     audio_id: str = Field(..., description="ID of the audio artifact to process.")
-    preset_name: str = Field(..., description="Preset to use for Stage 1 (e.g., 'punchy_pop').")
+    preset_name: str = Field(..., description="Preset to use for Stage 1 (e.g., 'hi_fi_streaming').")
+    control_profile: Optional[MasteringControlProfile] = Field(
+        None,
+        description="Optional bounded control profile for the stage-1 render.",
+    )
+    stem_mode: Optional[StemMode] = Field(
+        None,
+        description="Optional stem-separation policy for the interactive session. off skips Demucs, auto is heuristic, on forces stems.",
+    )
 
 class StartInteractiveMasteringOut(StrictBaseModel):
     session_token: str
@@ -721,8 +967,18 @@ class StartInteractiveMasteringOut(StrictBaseModel):
 
 class CommitInteractiveMasteringIn(StrictBaseModel):
     session_token: str = Field(..., description="The session token returned by start_interactive_mastering.")
-    warmth: float = Field(..., description="The new warmth value determined by the AI.")
-    transient_boost_db: float = Field(..., description="The new transient boost dB determined by the AI.")
+    warmth: Optional[float] = Field(None, description="Optional updated warmth value.")
+    transient_boost_db: Optional[float] = Field(None, description="Optional updated transient boost dB.")
+    control_profile: Optional[MasteringControlProfile] = Field(
+        None,
+        description="Optional bounded control-profile refinements to commit on the final interactive pass.",
+    )
+
+    @model_validator(mode="after")
+    def _validate_interactive_commit_payload(self) -> "CommitInteractiveMasteringIn":
+        if self.warmth is None and self.transient_boost_db is None and self.control_profile is None:
+            raise ValueError("interactive_commit_requires_change")
+        return self
 
 class CommitInteractiveMasteringOut(StrictBaseModel):
     artifact_id: str
@@ -791,15 +1047,20 @@ def _normalize_path(path: str) -> str:
     return os.path.normcase(os.path.realpath(os.path.abspath(path)))
 
 
-def _is_allowed_path(path: str) -> bool:
+def _path_within_roots(path: str, roots: Tuple[str, ...]) -> bool:
     norm = _normalize_path(path)
-    for allowed_root in (_normalize_path(STORAGE_DIR), _normalize_path(DATA_DIR_REAL)):
+    for allowed_root in roots:
+        allowed_norm = _normalize_path(allowed_root)
         try:
-            if os.path.commonpath([norm, allowed_root]) == allowed_root:
+            if os.path.commonpath([norm, allowed_norm]) == allowed_norm:
                 return True
         except ValueError:
             continue
     return False
+
+
+def _is_allowed_path(path: str) -> bool:
+    return _path_within_roots(path, (STORAGE_DIR, DATA_DIR_REAL))
 
 
 def _resolve_data_path(path: str) -> str:
@@ -820,12 +1081,8 @@ def _resolve_data_path(path: str) -> str:
         candidate = os.path.join(DATA_DIR, candidate)
     abs_path = os.path.abspath(candidate)
     real_path = os.path.realpath(abs_path)
-    try:
-        common = os.path.commonpath([os.path.normcase(real_path), os.path.normcase(DATA_DIR_REAL)])
-    except ValueError as exc:
-        raise ValueError("access_denied: Path outside allowlist.") from exc
-    if common != os.path.normcase(DATA_DIR_REAL):
-        raise ValueError("access_denied: Path outside allowlist.")
+    if not _path_within_roots(real_path, AUDIO_SOURCE_ROOTS):
+        raise ValueError("access_denied: Path outside audio source allowlist.")
     return real_path
 
 
@@ -890,15 +1147,17 @@ def _build_connect_packet(preview_limit: int = CONNECT_PREVIEW_LIMIT) -> Connect
 
     workflow_steps = [
         "1. Discover: get_connect_packet or read auralmind://connect-kit, then bootstrap when contracts are unknown",
-        "2. Ingest or resume: list_data_audio + register_audio_from_path, upload_init -> upload_chunk -> upload_finalize, or continue from an existing aud_*/art_* handle",
-        "3. Diagnose: analyze_audio on the current source or rendered artifact",
-        "4. Plan: use plan_mastering_strategy for semantic goals or propose_master_settings for explicit settings",
-        "5. Execute: run_master_job, master_audio, or master_closed_loop",
-        "6. Evaluate: job_status + job_result, then analyze_audio or compare_audio_metrics on returned artifacts",
-        "7. Intervene if needed: semantic_a_b_mastering, start_interactive_mastering, analyze_and_optimize_governor, ai_stem_remix, or creative DSP tools before re-analyzing and finalizing",
+        "2. Resume safely: use list_session_state whenever a session may already contain aud_*, art_*, job_*, or upl_* handles",
+        "3. Ingest or resume: list_data_audio + register_audio_from_path, upload_init -> upload_chunk -> upload_finalize, or continue from an existing aud_*/art_* handle",
+        "4. Diagnose: analyze_audio on the current source or rendered artifact",
+        "5. Plan: use plan_mastering_strategy for semantic goals or propose_master_settings for explicit settings",
+        "6. Execute: run_master_job, master_audio, or master_closed_loop",
+        "7. Evaluate: job_status + job_result, then analyze_audio or compare_audio_metrics on returned artifacts",
+        "8. Intervene if needed: semantic_a_b_mastering, start_interactive_mastering, analyze_and_optimize_governor, ai_stem_remix, or creative DSP tools before re-analyzing and finalizing",
     ]
 
     example_calls: Dict[str, Any] = {
+        "list_session_state": {},
         "list_data_audio": {},
         "register_audio_from_path": {"path": sample_path},
         "analyze_audio": {"audio_id": "aud_1234567890ab"},
@@ -910,6 +1169,7 @@ def _build_connect_packet(preview_limit: int = CONNECT_PREVIEW_LIMIT) -> Connect
                 "spatial_width": 0.45,
                 "low_end_focus": 0.5,
             },
+            "stem_mode": "auto",
         },
         "run_master_job": {
             "audio_id": "aud_1234567890ab",
@@ -926,6 +1186,7 @@ def _build_connect_packet(preview_limit: int = CONNECT_PREVIEW_LIMIT) -> Connect
                 "movement_amount": 0.35,
                 "low_end_focus": 0.5,
             },
+            "stem_mode": "auto",
         },
         "job_status": {"job_id": "job_1234567890ab"},
         "job_result": {"job_id": "job_1234567890ab"},
@@ -941,6 +1202,7 @@ def _build_connect_packet(preview_limit: int = CONNECT_PREVIEW_LIMIT) -> Connect
                 "spatial_width": 0.3,
                 "movement_amount": 0.2,
             },
+            "stem_mode": "auto",
         },
         "semantic_a_b_mastering": {
             "audio_id": "aud_1234567890ab",
@@ -950,6 +1212,7 @@ def _build_connect_packet(preview_limit: int = CONNECT_PREVIEW_LIMIT) -> Connect
         "start_interactive_mastering": {
             "audio_id": "aud_1234567890ab",
             "preset_name": "hi_fi_streaming",
+            "stem_mode": "auto",
         },
         "analyze_and_optimize_governor": {
             "audio_id": "aud_1234567890ab",
@@ -980,9 +1243,17 @@ def _tool_catalog_entries() -> List[ToolCatalogEntry]:
         ToolCatalogEntry(name="bootstrap", description="Discovery", input_model="Empty", output_model="BootstrapOut"),
         ToolCatalogEntry(name="capabilities", description="Server capability summary", input_model="Empty", output_model="CapabilitiesOut"),
         ToolCatalogEntry(name="get_connect_packet", description="First-contact packet with song preview and next calls", input_model="Empty", output_model="ConnectPacketOut"),
+        ToolCatalogEntry(
+            name="list_session_state",
+            description="Inspect current session handles, jobs, and uploads for safe workflow re-entry",
+            input_model="Empty",
+            output_model="SessionStateOut",
+            best_when="Use when a current session is already active and you need aud_*, art_*, job_*, or upl_* state.",
+            avoid_when="Skip in a brand-new session when bootstrap plus ingest gives you all needed context.",
+        ),
         ToolCatalogEntry(name="list_audio_assets", description="List audio files in the data directory", input_model="Empty", output_model="AudioAssetList"),
         ToolCatalogEntry(name="list_data_audio", description="Compatibility alias for list_audio_assets", input_model="Empty", output_model="AudioAssetList"),
-        ToolCatalogEntry(name="register_audio_from_path", description="Register a server-side audio file from data/", input_model="RegisterAudioPathIn", output_model="RegisterAudioResult"),
+        ToolCatalogEntry(name="register_audio_from_path", description="Register a server-side audio file from data/ or an allowed audio source root", input_model="RegisterAudioPathIn", output_model="RegisterAudioResult"),
         ToolCatalogEntry(name="upload_init", description="Start a resumable upload session", input_model="UploadInitIn", output_model="UploadInitOut"),
         ToolCatalogEntry(name="upload_chunk", description="Append a chunk to a resumable upload", input_model="UploadChunkIn", output_model="UploadStatusOut"),
         ToolCatalogEntry(name="upload_status", description="Inspect resumable upload progress", input_model="upload_id:string", output_model="UploadStatusOut"),
@@ -990,13 +1261,48 @@ def _tool_catalog_entries() -> List[ToolCatalogEntry]:
         ToolCatalogEntry(name="upload_audio_to_session", description="Legacy one-shot upload", input_model="UploadIn", output_model="UploadResult"),
         ToolCatalogEntry(name="analyze_audio", description="Analyze a source audio handle", input_model="AnalyzeIn", output_model="AudioMetrics"),
         ToolCatalogEntry(name="list_presets", description="List mastering presets", input_model="Empty", output_model="PresetsOut"),
-        ToolCatalogEntry(name="plan_mastering_strategy", description="Resolve semantic mastering intent into executable settings", input_model="StrategyPlanIn", output_model="StrategyPlanOut"),
-        ToolCatalogEntry(name="propose_master_settings", description="Validate and normalize mastering settings", input_model="MasterSettings", output_model="ProposedSettingsOut"),
-        ToolCatalogEntry(name="run_master_job", description="Queue an async mastering job", input_model="MasterRequest", output_model="JobLaunchOut"),
+        ToolCatalogEntry(
+            name="plan_mastering_strategy",
+            description="Resolve semantic mastering intent into executable settings",
+            input_model="StrategyPlanIn",
+            output_model="StrategyPlanOut",
+            best_when="Use for semantic goals when you want the server to choose and explain the best bounded master settings.",
+            avoid_when="Skip when preset, loudness, and control values are already explicit.",
+        ),
+        ToolCatalogEntry(
+            name="propose_master_settings",
+            description="Validate and normalize mastering settings",
+            input_model="MasterSettings",
+            output_model="ProposedSettingsOut",
+            best_when="Use when settings are already explicit and you want a safe normalized payload before rendering.",
+            avoid_when="Skip when explicit settings are not known yet and semantic planning should resolve them first.",
+        ),
+        ToolCatalogEntry(
+            name="run_master_job",
+            description="Queue an async mastering job",
+            input_model="MasterRequest",
+            output_model="JobLaunchOut",
+            best_when="Use for longer renders when the client can poll job_status and job_result.",
+            avoid_when="Skip when you want an immediate single-pass result in one call.",
+        ),
         ToolCatalogEntry(name="job_status", description="Poll a mastering job", input_model="JobIdIn", output_model="JobStatusOut"),
         ToolCatalogEntry(name="job_result", description="Fetch completed mastering job results", input_model="JobIdIn", output_model="JobResultOut"),
-        ToolCatalogEntry(name="master_audio", description="Run a single-pass master immediately", input_model="MasterRequest", output_model="MasterResult"),
-        ToolCatalogEntry(name="master_closed_loop", description="Run expert multi-pass mastering", input_model="ClosedLoopRequest", output_model="ClosedLoopResult"),
+        ToolCatalogEntry(
+            name="master_audio",
+            description="Run a single-pass master immediately",
+            input_model="MasterRequest",
+            output_model="MasterResult",
+            best_when="Use when the settings are already resolved and you want one immediate render.",
+            avoid_when="Skip when you want the server to compare and retune a first pass automatically.",
+        ),
+        ToolCatalogEntry(
+            name="master_closed_loop",
+            description="Run expert multi-pass mastering",
+            input_model="ClosedLoopRequest",
+            output_model="ClosedLoopResult",
+            best_when="Use for semantic goals when you want the server to plan, render, score, and optionally retune within a bounded loop.",
+            avoid_when="Skip when you only need a single exact render with no automatic second pass.",
+        ),
         ToolCatalogEntry(name="read_artifact", description="Read artifact bytes in chunks", input_model="ArtifactReadIn", output_model="ArtifactReadResult"),
         ToolCatalogEntry(name="safe_read_text", description="Read a text file inside the allowlist", input_model="FileReadIn", output_model="FileReadOut"),
         ToolCatalogEntry(name="safe_write_text", description="Write a text file inside the allowlist", input_model="FileWriteIn", output_model="FileWriteOut"),
@@ -1006,9 +1312,30 @@ def _tool_catalog_entries() -> List[ToolCatalogEntry]:
         ToolCatalogEntry(name="apply_musical_eq", description="Apply key-aware resonant EQ", input_model="MusicalEqIn", output_model="MusicalEqOut"),
         ToolCatalogEntry(name="apply_tempo_dynamics", description="Apply tempo-synced groove compression", input_model="TempoDynamicsIn", output_model="TempoDynamicsOut"),
         ToolCatalogEntry(name="apply_harmonic_excitation", description="Apply harmonic saturation", input_model="HarmonicExcitationIn", output_model="HarmonicExcitationOut"),
-        ToolCatalogEntry(name="start_interactive_mastering", description="Start an interactive stage-1 master", input_model="StartInteractiveMasteringIn", output_model="StartInteractiveMasteringOut"),
-        ToolCatalogEntry(name="commit_interactive_mastering", description="Commit interactive mastering tweaks", input_model="CommitInteractiveMasteringIn", output_model="CommitInteractiveMasteringOut"),
-        ToolCatalogEntry(name="semantic_a_b_mastering", description="Run semantic A/B mastering variants", input_model="SemanticABMasteringIn", output_model="SemanticABMasteringOut"),
+        ToolCatalogEntry(
+            name="start_interactive_mastering",
+            description="Start an interactive stage-1 master",
+            input_model="StartInteractiveMasteringIn",
+            output_model="StartInteractiveMasteringOut",
+            best_when="Use when the first pass is close and you want to refine the feel with one focused final commit.",
+            avoid_when="Skip when you still need broad semantic planning or a preset comparison first.",
+        ),
+        ToolCatalogEntry(
+            name="commit_interactive_mastering",
+            description="Commit interactive mastering tweaks",
+            input_model="CommitInteractiveMasteringIn",
+            output_model="CommitInteractiveMasteringOut",
+            best_when="Use after start_interactive_mastering to apply bounded warmth, transient, or control-profile refinements.",
+            avoid_when="Skip if no interactive session token exists yet.",
+        ),
+        ToolCatalogEntry(
+            name="semantic_a_b_mastering",
+            description="Run semantic A/B mastering variants",
+            input_model="SemanticABMasteringIn",
+            output_model="SemanticABMasteringOut",
+            best_when="Use when preset direction is uncertain and you want evidence from two rendered options.",
+            avoid_when="Skip when one preset direction is already clearly preferred.",
+        ),
         ToolCatalogEntry(name="analyze_and_optimize_governor", description="Optimize governor loops via crest analysis", input_model="AnalyzeAndOptimizeGovernorIn", output_model="AnalyzeAndOptimizeGovernorOut"),
         ToolCatalogEntry(name="ai_stem_remix", description="Analyze Demucs stems for mix intervention", input_model="AiStemRemixIn", output_model="AiStemRemixOut"),
     ]
@@ -1050,6 +1377,7 @@ def _bootstrap_example_calls(packet: ConnectPacketOut) -> Dict[str, Any]:
         "bootstrap": {"method": "tools/call", "params": {"name": "bootstrap", "arguments": {}}},
         "capabilities": {"method": "tools/call", "params": {"name": "capabilities", "arguments": {}}},
         "get_connect_packet": {"method": "tools/call", "params": {"name": "get_connect_packet", "arguments": {}}},
+        "list_session_state": {"method": "tools/call", "params": {"name": "list_session_state", "arguments": {}}},
         "list_presets": {"method": "tools/call", "params": {"name": "list_presets", "arguments": {}}},
         "plan_mastering_strategy": {
             "method": "tools/call",
@@ -1059,6 +1387,7 @@ def _bootstrap_example_calls(packet: ConnectPacketOut) -> Dict[str, Any]:
                     "audio_id": "aud_1234567890ab",
                     "goal": "Wide, controlled, streaming-ready master with punchy lows",
                     "platform": "spotify",
+                    "stem_mode": "auto",
                 },
             },
         },
@@ -1078,6 +1407,7 @@ def _bootstrap_example_calls(packet: ConnectPacketOut) -> Dict[str, Any]:
                         "spatial_width": 0.45,
                         "brightness_tilt": 0.25,
                     },
+                    "stem_mode": "auto",
                 },
             },
         },
@@ -1172,6 +1502,120 @@ def _upload_status_from_meta(meta: Dict[str, Any]) -> UploadStatusOut:
         next_index=int(meta["next_index"]),
         done=received >= total,
         expected_sha256=meta.get("sha256"),
+    )
+
+
+def _list_upload_metas(session_dir: str) -> List[Dict[str, Any]]:
+    metas: List[Dict[str, Any]] = []
+    root = _uploads_root(session_dir)
+    with os.scandir(root) as entries:
+        for entry in entries:
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            if not entry.name.endswith(".json"):
+                continue
+            try:
+                with open(entry.path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                if isinstance(meta, dict) and UPLOAD_ID_RE.match(str(meta.get("upload_id", ""))):
+                    metas.append(meta)
+            except (OSError, json.JSONDecodeError):
+                continue
+    metas.sort(key=lambda item: float(item.get("created_at", 0.0)))
+    return metas
+
+
+def _list_artifact_entries(session_key: str, session_dir: str) -> List["ArtifactEntry"]:
+    entries_by_id: Dict[str, ArtifactEntry] = {}
+    with _ARTIFACTS_LOCK:
+        for artifact_id, cached in _ARTIFACTS.get(session_key, {}).items():
+            entries_by_id[artifact_id] = cached
+
+    with os.scandir(session_dir) as entries:
+        for entry in entries:
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            if not entry.name.endswith(".json"):
+                continue
+            stem = os.path.splitext(entry.name)[0]
+            if not HANDLE_RE.match(stem):
+                continue
+            try:
+                with open(entry.path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                continue
+            artifact_id = str(data.get("artifact_id", ""))
+            if not HANDLE_RE.match(artifact_id):
+                continue
+            if artifact_id in entries_by_id:
+                continue
+            if not {"kind", "filename", "media_type", "size_bytes", "sha256", "data_filename"} <= set(data):
+                continue
+            entries_by_id[artifact_id] = ArtifactEntry(
+                artifact_id=artifact_id,
+                kind=str(data["kind"]),
+                filename=str(data["filename"]),
+                media_type=str(data["media_type"]),
+                size_bytes=int(data["size_bytes"]),
+                sha256=str(data["sha256"]),
+                data_filename=str(data["data_filename"]),
+                created_at=float(data.get("created_at", time.time())),
+            )
+    return sorted(entries_by_id.values(), key=lambda item: item.created_at)
+
+
+def _build_session_state_out(session_key: str, session_dir: str) -> SessionStateOut:
+    artifacts = [
+        SessionArtifactState(
+            handle=entry.artifact_id,
+            kind=entry.kind,
+            status="ready",
+            filename=entry.filename,
+            media_type=entry.media_type,
+            size_bytes=entry.size_bytes,
+            created_at=_iso_utc(entry.created_at),
+        )
+        for entry in _list_artifact_entries(session_key, session_dir)
+    ]
+    with _JOBS_LOCK:
+        jobs = [
+            SessionJobState(
+                handle=job.job_id,
+                status=job.status,
+                progress=job.progress,
+                audio_id=job.audio_id,
+                created_at=_iso_utc(job.created_at),
+                updated_at=_iso_utc(job.finished_at or job.started_at or job.created_at),
+            )
+            for job in sorted(
+                (j for j in _JOBS.values() if j.session_key == session_key),
+                key=lambda item: item.created_at,
+            )
+        ]
+    uploads = [
+        SessionUploadState(
+            handle=str(meta["upload_id"]),
+            status="done" if int(meta.get("received_bytes", 0)) >= int(meta.get("total_bytes", 0)) else "receiving",
+            filename=str(meta["filename"]),
+            total_bytes=int(meta["total_bytes"]),
+            received_bytes=int(meta["received_bytes"]),
+            next_index=int(meta["next_index"]),
+            created_at=_iso_utc(float(meta.get("created_at", time.time()))),
+            updated_at=_iso_utc(float(meta.get("updated_at", meta.get("created_at", time.time())))),
+        )
+        for meta in _list_upload_metas(session_dir)
+    ]
+    return SessionStateOut(
+        session_key=session_key,
+        artifacts=artifacts,
+        jobs=jobs,
+        uploads=uploads,
+        counts=SessionStateCounts(
+            artifacts=len(artifacts),
+            jobs=len(jobs),
+            uploads=len(uploads),
+        ),
     )
 
 
@@ -1451,7 +1895,46 @@ def _get_maestro() -> Tuple[Optional[Any], Optional[Dict[str, Any]]]:
         return _MAESTRO, None
 
 
+def _width_bias_label(width_hi: float) -> str:
+    if width_hi >= 1.29:
+        return "wide"
+    if width_hi <= 1.22:
+        return "focused"
+    return "balanced"
+
+
+def _movement_bias_label(movement_amount: float) -> str:
+    if movement_amount >= 0.2:
+        return "animated"
+    if movement_amount <= 0.1:
+        return "restrained"
+    return "balanced"
+
+
+def _preset_semantic_metadata(name: str, preset: Any) -> Dict[str, Any]:
+    defaults = PRESET_SEMANTICS.get(
+        name,
+        {
+            "tone": "balanced and modern",
+            "width_bias": "balanced",
+            "movement_bias": "balanced",
+            "best_for": ["general-purpose mastering", "reliable first-pass exploration"],
+            "avoid_when": ["a more specialized preset direction is already obvious"],
+            "stem_default": "auto",
+        },
+    )
+    return {
+        "tone": defaults["tone"],
+        "width_bias": str(defaults.get("width_bias") or _width_bias_label(float(getattr(preset, "width_hi", 1.24)))),
+        "movement_bias": str(defaults.get("movement_bias") or _movement_bias_label(float(getattr(preset, "movement_amount", 0.15)))),
+        "best_for": defaults["best_for"],
+        "avoid_when": defaults["avoid_when"],
+        "stem_default": str(defaults.get("stem_default") or getattr(preset, "stem_mode", "auto")),
+    }
+
+
 def _serialize_preset(preset: Any, *, include_extended: bool = False) -> Dict[str, Any]:
+    semantic = _preset_semantic_metadata(str(getattr(preset, "name", "unknown")), preset)
     payload: Dict[str, Any] = {
         "target_lufs": float(getattr(preset, "target_lufs", -12.0)),
         "ceiling_dbfs": float(getattr(preset, "ceiling_dbfs", -1.0)),
@@ -1461,6 +1944,7 @@ def _serialize_preset(preset: Any, *, include_extended: bool = False) -> Dict[st
         "enable_harshness_limiter": bool(getattr(preset, "enable_harshness_limiter", True)),
         "enable_air_motion": bool(getattr(preset, "enable_air_motion", True)),
         "bit_depth": str(getattr(preset, "bit_depth", "float32")),
+        **semantic,
     }
     if include_extended:
         payload.update(
@@ -1475,6 +1959,7 @@ def _serialize_preset(preset: Any, *, include_extended: bool = False) -> Dict[st
                 "hooklift_mix": float(getattr(preset, "hooklift_mix", 0.0)),
                 "mono_sub_base_mix": float(getattr(preset, "mono_sub_base_mix", 0.55)),
                 "enable_stem_separation": bool(getattr(preset, "enable_stem_separation", False)),
+                "stem_mode": str(getattr(preset, "stem_mode", "auto")),
             }
         )
     return payload
@@ -1530,6 +2015,7 @@ def _master_settings_from_preset(preset: Any) -> MasterSettings:
         governor_search_steps=None,
         governor_gr_limit_db=None,
         stem_gains_db=None,
+        stem_mode=str(getattr(preset, "stem_mode", "auto")),
     )
 
 
@@ -1589,6 +2075,11 @@ def _normalize_master_settings(settings: MasterSettings) -> MasterSettings:
             str(name): round(max(-12.0, min(12.0, float(gain))), 2)
             for name, gain in settings.stem_gains_db.items()
         }
+    stem_mode = settings.stem_mode
+    if stem_mode is None:
+        stem_mode = "auto"
+    if stem_gains:
+        stem_mode = "on"
 
     return MasterSettings(
         preset_name=str(settings.preset_name),
@@ -1602,6 +2093,7 @@ def _normalize_master_settings(settings: MasterSettings) -> MasterSettings:
         governor_search_steps=governor_steps,
         governor_gr_limit_db=governor_gr_limit,
         stem_gains_db=stem_gains,
+        stem_mode=stem_mode,
     )
 
 
@@ -1958,7 +2450,9 @@ def _preset_overrides_from_settings(base_preset: Any, settings: MasterSettings) 
         "warmth": settings.warmth,
         "transient_sculpt_boost_db": settings.transient_boost_db,
         "enable_harshness_limiter": settings.enable_harshness_limiter,
+        "enable_masking_eq": settings.enable_masking_eq,
         "enable_air_motion": settings.enable_air_motion,
+        "enable_hooklift": settings.enable_hooklift,
         "bit_depth": settings.bit_depth,
     }
     if settings.governor_search_steps is not None:
@@ -1967,7 +2461,11 @@ def _preset_overrides_from_settings(base_preset: Any, settings: MasterSettings) 
         p_args["governor_gr_limit_db"] = settings.governor_gr_limit_db
     if settings.stem_gains_db:
         p_args["stem_gains_db"] = settings.stem_gains_db
+        p_args["stem_mode"] = "on"
         p_args["enable_stem_separation"] = True
+    elif settings.stem_mode is not None:
+        p_args["stem_mode"] = settings.stem_mode
+        p_args["enable_stem_separation"] = settings.stem_mode != "off"
 
     profile = settings.control_profile
     if profile is None:
@@ -2069,6 +2567,81 @@ def _calculate_score(metrics: AudioMetrics, target_lufs: float, ceiling: float) 
     return round(score, 3)
 
 
+def _retune_control_profile(
+    metrics: AudioMetrics,
+    profile: Optional[MasteringControlProfile],
+) -> Tuple[Optional[MasteringControlProfile], List[TuneDelta]]:
+    values = {
+        field_name: float(getattr(profile, field_name, 0.0) or 0.0)
+        for field_name in CONTROL_PROFILE_FIELDS
+    }
+    deltas: List[TuneDelta] = []
+
+    def apply_delta(field_name: str, delta: float, reason_code: str, reason_detail: str) -> None:
+        old_value = values[field_name]
+        new_value = round(max(-1.0, min(1.0, old_value + delta)), 3)
+        if new_value == old_value:
+            return
+        values[field_name] = new_value
+        deltas.append(
+            TuneDelta(
+                param=f"control_profile.{field_name}",
+                old_value=round(old_value, 3),
+                new_value=new_value,
+                reason_code=reason_code,
+                reason_detail=reason_detail,
+            )
+        )
+
+    if metrics.stereo_correlation < 0.05:
+        apply_delta(
+            "spatial_width",
+            -0.2,
+            "phase_fragility",
+            f"Stereo correlation is fragile at {metrics.stereo_correlation:.3f}, so width is tightened slightly.",
+        )
+    elif metrics.stereo_correlation > 0.35 and metrics.crest_db >= 9.0:
+        apply_delta(
+            "spatial_width",
+            0.08,
+            "stable_image",
+            f"Stereo correlation is healthy at {metrics.stereo_correlation:.3f}, so width can open slightly without losing focus.",
+        )
+
+    if (metrics.centroid_hz or 0.0) > 4200.0 or metrics.true_peak_dbtp > -0.1:
+        apply_delta(
+            "harshness_control",
+            0.18,
+            "bright_or_hot_source",
+            "The source is bright or peak-hot, so upper-mid protection is increased slightly.",
+        )
+
+    if metrics.crest_db < 7.5:
+        apply_delta(
+            "low_end_focus",
+            -0.14,
+            "dense_low_end",
+            f"Crest factor is low at {metrics.crest_db:.2f} dB, so low-end focus is trimmed to reduce density.",
+        )
+        if metrics.stereo_correlation >= 0.12 and metrics.true_peak_dbtp <= -0.2:
+            apply_delta(
+                "movement_amount",
+                0.06,
+                "recover_lift",
+                "A small movement lift helps recover perceived energy when the program feels dense but still stable.",
+            )
+    elif metrics.crest_db > 12.5:
+        apply_delta(
+            "movement_amount",
+            -0.06,
+            "preserve_openness",
+            f"Crest factor is high at {metrics.crest_db:.2f} dB, so movement is eased to preserve openness.",
+        )
+
+    normalized = _normalize_control_profile(MasteringControlProfile(**values))
+    return normalized, deltas
+
+
 def _calculate_retune(metrics: AudioMetrics, current: MasterRequest) -> Tuple[MasterRequest, List[TuneDelta]]:
     """Generates a retune plan if Run1 fails thresholds."""
     deltas = []
@@ -2095,14 +2668,10 @@ def _calculate_retune(metrics: AudioMetrics, current: MasterRequest) -> Tuple[Ma
             reason_code="peak_violation", reason_detail="Reducing warmth to lower crest/peaks"
         ))
 
-    # Crest correction
-    if metrics.crest_db < 7.5:
-        old_tb = next_req.transient_boost_db
-        next_req.transient_boost_db = min(4.0, next_req.transient_boost_db + 0.5)
-        deltas.append(TuneDelta(
-            param="transient_boost_db", old_value=old_tb, new_value=next_req.transient_boost_db,
-            reason_code="low_crest", reason_detail="Increasing transients to recover dynamics"
-        ))
+    tuned_profile, profile_deltas = _retune_control_profile(metrics, next_req.control_profile)
+    if tuned_profile is not None:
+        next_req.control_profile = tuned_profile
+    deltas.extend(profile_deltas)
 
     return next_req, deltas
 
@@ -2343,6 +2912,7 @@ def get_control_surface_resource() -> str:
             "governor_search_steps": {"min": 1, "max": 16},
             "governor_gr_limit_db": {"min": -6.0, "max": -0.4},
             "stem_gains_db": {"min_db": -12.0, "max_db": 12.0},
+            "stem_mode": {"options": ["off", "auto", "on"]},
         },
         "precedence": [
             "base preset",
@@ -2355,6 +2925,7 @@ def get_control_surface_resource() -> str:
             "Use plan_mastering_strategy when starting from natural-language goals.",
             "Use propose_master_settings to validate a fully-specified request before execution.",
             "control_profile is intentionally bounded so LLMs can steer the master without exposing the full raw DSP surface.",
+            "stem_mode=auto is the default premium path; it avoids stem work unless the request or source signals justify it.",
         ],
     }
     return json.dumps(payload, indent=2)
@@ -2389,6 +2960,9 @@ def get_contracts_resource() -> str:
     model_schemas = {
         "CapabilitiesOut": CapabilitiesOut.model_json_schema(),
         "BootstrapOut": BootstrapOut.model_json_schema(),
+        "ToolCatalogEntry": ToolCatalogEntry.model_json_schema(),
+        "ResourceCatalogEntry": ResourceCatalogEntry.model_json_schema(),
+        "PromptCatalogEntry": PromptCatalogEntry.model_json_schema(),
         "ConnectSongPreview": ConnectSongPreview.model_json_schema(),
         "ConnectPacketOut": ConnectPacketOut.model_json_schema(),
         "AnalyzeIn": AnalyzeIn.model_json_schema(),
@@ -2405,6 +2979,7 @@ def get_contracts_resource() -> str:
         "RegisterAudioPathIn": RegisterAudioPathIn.model_json_schema(),
         "RegisterAudioResult": RegisterAudioResult.model_json_schema(),
         "AudioMetrics": AudioMetrics.model_json_schema(),
+        "PresetSummary": PresetSummary.model_json_schema(),
         "PresetsOut": PresetsOut.model_json_schema(),
         "MasterSettings": MasterSettings.model_json_schema(),
         "StrategyPlanIn": StrategyPlanIn.model_json_schema(),
@@ -2414,6 +2989,11 @@ def get_contracts_resource() -> str:
         "MasterResult": MasterResult.model_json_schema(),
         "ClosedLoopRequest": ClosedLoopRequest.model_json_schema(),
         "ClosedLoopResult": ClosedLoopResult.model_json_schema(),
+        "SessionArtifactState": SessionArtifactState.model_json_schema(),
+        "SessionJobState": SessionJobState.model_json_schema(),
+        "SessionUploadState": SessionUploadState.model_json_schema(),
+        "SessionStateCounts": SessionStateCounts.model_json_schema(),
+        "SessionStateOut": SessionStateOut.model_json_schema(),
         "JobLaunchOut": JobLaunchOut.model_json_schema(),
         "JobIdIn": JobIdIn.model_json_schema(),
         "JobStatusOut": JobStatusOut.model_json_schema(),
@@ -2465,6 +3045,7 @@ def get_connect_kit_resource() -> str:
     payload = {
         "notes": [
             "Read this resource immediately after connect.",
+            "Use `list_session_state` first when resuming or when current session handles may already exist.",
             "Use `register_audio_from_path` for server-side files.",
             "Use `upload_init/upload_chunk/upload_finalize` if no songs are present.",
             "Any current `aud_*` or `art_*` handle can re-enter the workflow at the diagnose step.",
@@ -2539,7 +3120,9 @@ def get_server_info() -> str:
         "connect_preview_limit": CONNECT_PREVIEW_LIMIT,
         "max_read_bytes": MAX_READ_BYTES,
         "supported_bit_depths": ["float32", "float64"],
+        "supported_stem_modes": ["off", "auto", "on"],
         "data_dir": DATA_DIR,
+        "register_audio_roots": list(AUDIO_SOURCE_ROOTS),
         "allowed_audio_extensions": sorted(ALLOWED_AUDIO_EXTENSIONS),
     }
     return json.dumps(payload, indent=2)
@@ -2556,17 +3139,18 @@ async def on_connect_prompt() -> list[Message]:
     if packet.total_songs > 0:
         flow_hint = (
             "Checkpoint loop: 1) call `get_connect_packet` or read `auralmind://connect-kit` "
-            "2) call `list_data_audio` and `register_audio_from_path`, or continue from an existing `aud_*` or `art_*` handle "
-            "3) call `analyze_audio` "
-            "4) choose `plan_mastering_strategy`, `propose_master_settings`, or a focused intervention branch "
-            "5) render with `run_master_job`, `master_audio`, or `master_closed_loop` "
-            "6) evaluate with `job_result`, `analyze_audio`, or `compare_audio_metrics` "
-            "7) if the pass is close, branch into `semantic_a_b_mastering`, `start_interactive_mastering`, `analyze_and_optimize_governor`, or `ai_stem_remix`."
+            "2) call `list_session_state` if the session may already contain aud_*, art_*, job_*, or upl_* handles "
+            "3) call `list_data_audio` and `register_audio_from_path`, or continue from an existing `aud_*` or `art_*` handle "
+            "4) call `analyze_audio` "
+            "5) choose `plan_mastering_strategy`, `propose_master_settings`, or a focused intervention branch "
+            "6) render with `run_master_job`, `master_audio`, or `master_closed_loop` "
+            "7) evaluate with `job_result`, `analyze_audio`, or `compare_audio_metrics` "
+            "8) if the pass is close, branch into `semantic_a_b_mastering`, `start_interactive_mastering`, `analyze_and_optimize_governor`, or `ai_stem_remix`."
         )
     else:
         flow_hint = (
             "No songs found in `data/`. "
-            "Use upload flow: `upload_init` -> `upload_chunk` -> `upload_finalize`, then `analyze_audio`, choose plan or intervention tools, render, evaluate, and re-enter from the returned `aud_*` or `art_*` handles as needed."
+            "Use `list_session_state` first if this is a resumed session, otherwise use upload flow: `upload_init` -> `upload_chunk` -> `upload_finalize`, then `analyze_audio`, choose plan or intervention tools, render, evaluate, and re-enter from the returned `aud_*` or `art_*` handles as needed."
         )
     return [
         Message(
@@ -2661,9 +3245,12 @@ def capabilities() -> CapabilitiesOut:
             "server_name",
             "async_jobs",
             "bootstrap_discovery",
+            "session_state_discovery",
             "closed_loop_mastering",
             "semantic_strategy_planning",
             "control_profile",
+            "semantic_preset_metadata",
+            "stem_mode_policy",
             "resources",
             "prompts",
             "safe_filesystem",
@@ -2678,6 +3265,13 @@ def capabilities() -> CapabilitiesOut:
 def get_connect_packet() -> ConnectPacketOut:
     """Returns a first-contact packet with song preview and call templates."""
     return _build_connect_packet()
+
+
+@mcp.tool()
+def list_session_state(ctx: Context = None) -> SessionStateOut:
+    """List current session handles, jobs, and uploads for safe workflow re-entry."""
+    session_key, session_dir = _get_session_info(ctx)
+    return _build_session_state_out(session_key, session_dir)
 
 
 @mcp.tool()
@@ -2711,7 +3305,7 @@ def list_data_audio() -> AudioAssetList:
 
 @mcp.tool()
 def register_audio_from_path(
-    path: Annotated[str, Field(description="Path to an audio file within the data directory.")],
+    path: Annotated[str, Field(description="Path to an audio file in data/ or an allowed audio source root.")],
     ctx: Context = None,
 ) -> RegisterAudioResult:
     """Register a server-side audio file without upload."""
@@ -3045,6 +3639,7 @@ def master_closed_loop(req: ClosedLoopRequest, ctx: Context = None) -> ClosedLoo
             governor_search_steps=req.governor_search_steps,
             governor_gr_limit_db=req.governor_gr_limit_db,
             stem_gains_db=req.stem_gains_db,
+            stem_mode=req.stem_mode,
         ),
         ctx,
         session_key=session_key,
@@ -3174,7 +3769,8 @@ def upload_status(
     ctx: Context = None,
 ) -> UploadStatusOut:
     """Read resumable upload status."""
-    if not UPLOAD_ID_RE.match(upload_id = str):
+    upload_id = str(upload_id)
+    if not UPLOAD_ID_RE.match(upload_id):
         raise ValueError("invalid_upload_id")
     _, session_dir = _get_session_info(ctx)
     with _UPLOAD_LOCK:
@@ -3619,7 +4215,11 @@ async def start_interactive_mastering(req: StartInteractiveMasteringIn, ctx: Con
     if req.preset_name not in presets:
         raise ValueError(f"unknown_preset: {req.preset_name}")
 
-    settings = _finalize_master_settings(req.preset_name)
+    settings = _finalize_master_settings(
+        req.preset_name,
+        control_profile=req.control_profile,
+        safe_overrides={"stem_mode": req.stem_mode} if req.stem_mode is not None else None,
+    )
     run1_req = _master_request_from_settings(req.audio_id, settings)
     await ctx.report_progress(25, 100, "Rendering interactive stage 1 master...")
     res1 = await asyncio.to_thread(
@@ -3643,7 +4243,7 @@ async def start_interactive_mastering(req: StartInteractiveMasteringIn, ctx: Con
     }
     return StartInteractiveMasteringOut(
         session_token=session_token,
-        message="Stage 1 complete. Review metrics and commit final warmth/transient changes.",
+        message="Stage 1 complete. Review metrics and commit final warmth, transient, or bounded control-profile changes.",
         metrics=res1.metrics_after,
         stage1_settings=run1_req,
     )
@@ -3660,13 +4260,14 @@ async def commit_interactive_mastering(req: CommitInteractiveMasteringIn, ctx: C
         raise ValueError("not_found: Interactive session not found.")
 
     base_settings = MasterSettings(**session["stage1_settings"])
+    merged_profile = _merge_control_profiles(base_settings.control_profile, req.control_profile)
     resolved_settings = _finalize_master_settings(
         base_settings.preset_name,
-        control_profile=base_settings.control_profile,
+        control_profile=merged_profile,
         explicit_overrides={
             "target_lufs": base_settings.target_lufs,
-            "warmth": req.warmth,
-            "transient_boost_db": req.transient_boost_db,
+            "warmth": req.warmth if req.warmth is not None else base_settings.warmth,
+            "transient_boost_db": req.transient_boost_db if req.transient_boost_db is not None else base_settings.transient_boost_db,
             "enable_harshness_limiter": base_settings.enable_harshness_limiter,
             "enable_air_motion": base_settings.enable_air_motion,
             "bit_depth": base_settings.bit_depth,
@@ -3675,6 +4276,7 @@ async def commit_interactive_mastering(req: CommitInteractiveMasteringIn, ctx: C
             "governor_search_steps": base_settings.governor_search_steps,
             "governor_gr_limit_db": base_settings.governor_gr_limit_db,
             "stem_gains_db": base_settings.stem_gains_db,
+            "stem_mode": base_settings.stem_mode,
         },
     )
     run2_req = _master_request_from_settings(session["audio_id"], resolved_settings)
@@ -3690,8 +4292,9 @@ async def commit_interactive_mastering(req: CommitInteractiveMasteringIn, ctx: C
     )
     ascii_console = (
         "AURALMIND INTERACTIVE MASTER\n"
-        f"Warmth:        {req.warmth:.2f}\n"
-        f"Transient dB:  {req.transient_boost_db:.2f}\n"
+        f"Warmth:        {resolved_settings.warmth:.2f}\n"
+        f"Transient dB:  {resolved_settings.transient_boost_db:.2f}\n"
+        f"Width intent:  {(resolved_settings.control_profile.spatial_width if resolved_settings.control_profile else 0.0):.2f}\n"
         f"LUFS:          {res2.metrics_after.integrated_lufs:.2f}\n"
         f"True Peak:     {res2.metrics_after.true_peak_dbtp:.2f} dBTP"
     )
