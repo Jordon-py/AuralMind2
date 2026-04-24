@@ -3,18 +3,20 @@
 Purpose: connects to the AuralMind2 FastMCP server and renders Christopher's
 fixed 10-song queue using MCP tools only. The client exports returned artifact
 bytes, but all analysis, planning, mastering, phase alignment, and final
-metrics come from the MCP server.
+metrics come from the MCP server. Optional delivery-format exports are file
+encoding copies from the MCP artifact, not extra local mastering.
 Data shapes: `TrackPlanItem` rows persist to `manifest.json` with source
 metadata, MCP handles (`aud_*`, `job_*`, `art_*`), selected settings, phase
-alignment metrics, and final artifact/export paths.
+alignment metrics, final artifact/export paths, and optional 24/32-bit
+delivery export metadata.
 Syntax: `python tools/run_explicit_premium_hifi_trap_batch.py --poll-seconds 3`
-or resume with `--output-root <existing-folder> --retry-errors`.
-Important functions: `main` near line 391, `run_one` near line 285,
-`export_artifact` near line 190, and `mcp_call` near line 122.
+or one-off `--source "data/FaceTime (6).wav" --delivery-formats 24,32`.
+Important functions: `main` near line 716, `run_one` near line 425,
+`export_artifact` near line 222, and `mcp_call` near line 154.
 Possible bugs: if the Python process stops, in-memory MCP job handles can be
 lost; resume keeps completed exports but must rerun unfinished jobs.
-Enhance next: add MCP-side delivery format conversion; add a server-side batch
-queue tool so this script becomes a thin launcher.
+Enhance next: move delivery format conversion into an MCP server tool; add a
+server-side batch queue tool so this script becomes a thin launcher.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -100,6 +103,7 @@ class TrackPlanItem:
     raw_artifact_id: str = ""
     phase_artifact_id: str = ""
     final_export_path: str = ""
+    delivery_exports: Dict[str, Any] = None  # type: ignore[assignment]
     source_metrics: Dict[str, Any] = None  # type: ignore[assignment]
     final_metrics: Dict[str, Any] = None  # type: ignore[assignment]
     phase_alignment: Dict[str, Any] = None  # type: ignore[assignment]
@@ -119,6 +123,8 @@ class TrackPlanItem:
             self.final_metrics = {}
         if self.phase_alignment is None:
             self.phase_alignment = {}
+        if self.delivery_exports is None:
+            self.delivery_exports = {}
         if self.plan_reasoning is None:
             self.plan_reasoning = []
         if self.plan_warnings is None:
@@ -247,11 +253,136 @@ async def export_artifact(client: Client, artifact_id: str, destination: Path) -
     }
 
 
-def build_plan(out_root: Path) -> List[TrackPlanItem]:
+def file_sha256(path: Path) -> str:
+    sha = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            sha.update(chunk)
+    return sha.hexdigest()
+
+
+def run_process(command: List[str]) -> str:
+    proc = subprocess.run(command, check=False, capture_output=True, text=True)
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        raise RuntimeError(f"command_failed:{command[0]} exit={proc.returncode}: {stderr}")
+    return (proc.stdout or "").strip()
+
+
+def probe_audio_file(path: Path) -> Dict[str, Any]:
+    raw = run_process(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_name,sample_rate,sample_fmt,bits_per_sample,bits_per_raw_sample,channels",
+            "-of",
+            "json",
+            str(path),
+        ]
+    )
+    payload = json.loads(raw or "{}")
+    streams = payload.get("streams") or []
+    return dict(streams[0]) if streams else {}
+
+
+def parse_delivery_formats(value: str) -> List[str]:
+    if not value.strip():
+        return []
+    parsed: List[str] = []
+    for part in re.split(r"[, ]+", value.strip().lower()):
+        if not part:
+            continue
+        normalized = part.replace("-bit", "").replace("bit", "").replace("float", "")
+        if normalized in {"24", "32"} and normalized not in parsed:
+            parsed.append(normalized)
+        else:
+            raise ValueError(f"unsupported_delivery_format: {part}; expected 24 and/or 32")
+    return parsed
+
+
+def delivery_path_for(raw_path: Path, output_root: Path, fmt: str) -> Path:
+    if fmt == "24":
+        return output_root / "delivery_24bit" / f"{raw_path.stem}__24bit.wav"
+    if fmt == "32":
+        return output_root / "delivery_32bitfloat" / f"{raw_path.stem}__32bitfloat.wav"
+    raise ValueError(f"unsupported_delivery_format: {fmt}")
+
+
+def write_delivery_exports(
+    source_path: Path,
+    output_root: Path,
+    formats: List[str],
+    *,
+    log_path: Path,
+) -> Dict[str, Any]:
+    exports: Dict[str, Any] = {}
+    if not formats:
+        return exports
+    if not source_path.exists():
+        raise FileNotFoundError(source_path)
+
+    for fmt in formats:
+        codec = "pcm_s24le" if fmt == "24" else "pcm_f32le"
+        destination = delivery_path_for(source_path, output_root, fmt)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        run_process(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(source_path),
+                "-map_metadata",
+                "0",
+                "-c:a",
+                codec,
+                str(destination),
+            ]
+        )
+        exports[fmt] = {
+            "path": str(destination),
+            "codec": codec,
+            "size_bytes": destination.stat().st_size,
+            "sha256": file_sha256(destination),
+            "probe": probe_audio_file(destination),
+            "source_master_path": str(source_path),
+            "note": "Delivery encoding only; MCP phase-aligned artifact remains the master source.",
+        }
+        append_log(log_path, f"delivery_{fmt}bit {destination}")
+    return exports
+
+
+def normalize_source_path(source: str) -> Path:
+    candidate = source.strip().strip('"')
+    if not candidate:
+        raise ValueError("empty_source")
+    p = Path(candidate)
+    if p.is_absolute():
+        return p
+    normalized = candidate.replace("\\", "/")
+    if normalized.lower().startswith("./"):
+        normalized = normalized[2:]
+    if normalized.lower().startswith("data/"):
+        normalized = normalized[5:]
+    return REPO_ROOT / "data" / normalized
+
+
+def build_plan(out_root: Path, sources: Optional[List[str]] = None) -> List[TrackPlanItem]:
     final_dir = out_root / "final"
     plan: List[TrackPlanItem] = []
-    for index, filename in enumerate(SOURCE_FILENAMES, start=1):
-        path = REPO_ROOT / "data" / filename
+    source_values = sources if sources else SOURCE_FILENAMES
+    for index, source in enumerate(source_values, start=1):
+        path = normalize_source_path(source)
+        filename = path.name
         exists = path.exists()
         stat = path.stat() if exists else None
         display_name = path.stem
@@ -295,6 +426,9 @@ async def run_one(
     client: Client,
     item: TrackPlanItem,
     *,
+    total_count: int,
+    delivery_formats: List[str],
+    output_root: Path,
     poll_s: float,
     max_wait_s: float,
     log_path: Path,
@@ -306,8 +440,8 @@ async def run_one(
     if not item.source_exists:
         raise FileNotFoundError(item.source_path)
 
-    append_log(log_path, f"register {item.index}/10 {item.filename}")
-    registered = await mcp_call(client, "register_audio_from_path", {"path": item.filename})
+    append_log(log_path, f"register {item.index}/{total_count} {item.filename}")
+    registered = await mcp_call(client, "register_audio_from_path", {"path": item.source_path})
     item.audio_id = str(registered["audio_id"])
 
     analysis = await mcp_call(client, "analyze_audio", {"audio_id": item.audio_id})
@@ -317,7 +451,7 @@ async def run_one(
         client,
         "premium_trap_mastering_session",
         {
-            "file_uri": item.filename,
+            "file_uri": item.source_path,
             "goal": "premium hi-fidelity AI-integrated trap master with premium phase alignment",
             "platform": DEFAULT_PLATFORM,
             "intensity": "balanced",
@@ -368,7 +502,7 @@ async def run_one(
     append_log(
         log_path,
         (
-            f"launch {item.index}/10 {item.display_name} via_mcp preset={item.preset_name} "
+            f"launch {item.index}/{total_count} {item.display_name} via_mcp preset={item.preset_name} "
             f"stem={item.stem_mode} target={item.target_lufs} phase=server_premium_phase_align"
         ),
     )
@@ -383,7 +517,7 @@ async def run_one(
         progress = int(status.get("progress") or 0)
         if progress != last_progress:
             last_progress = progress
-            append_log(log_path, f"progress {item.index}/10 {item.display_name} {status['status']} {progress}%")
+            append_log(log_path, f"progress {item.index}/{total_count} {item.display_name} {status['status']} {progress}%")
         if status["status"] in ("done", "error", "cancelled"):
             break
         if time.time() - started > max_wait_s:
@@ -408,12 +542,18 @@ async def run_one(
     item.final_metrics = dict(final_analysis["metrics"])
     export_info = await export_artifact(client, item.phase_artifact_id, Path(item.final_export_path))
     item.final_metrics["export"] = export_info
+    item.delivery_exports = write_delivery_exports(
+        Path(item.final_export_path),
+        output_root,
+        delivery_formats,
+        log_path=log_path,
+    )
     item.status = "done"
     item.completed_at = utc_now()
     append_log(
         log_path,
         (
-            f"complete {item.index}/10 {item.display_name} -> {item.final_export_path} "
+            f"complete {item.index}/{total_count} {item.display_name} -> {item.final_export_path} "
             f"LUFS={item.final_metrics.get('integrated_lufs')} "
             f"TP={item.final_metrics.get('true_peak_dbtp')} "
             f"phase_low={item.phase_alignment.get('low_corr_before')}->{item.phase_alignment.get('low_corr_after')}"
@@ -426,11 +566,42 @@ def default_output_root() -> Path:
     return REPO_ROOT / "masters" / f"mcp_premium_hifi_trap_explicit_{stamp}"
 
 
+def ensure_delivery_exports(
+    plan: List[TrackPlanItem],
+    output_root: Path,
+    formats: List[str],
+    *,
+    log_path: Path,
+) -> None:
+    if not formats:
+        return
+    for item in plan:
+        if item.status != "done":
+            continue
+        existing = item.delivery_exports or {}
+        missing = [
+            fmt
+            for fmt in formats
+            if fmt not in existing or not Path(str(existing.get(fmt, {}).get("path", ""))).exists()
+        ]
+        if not missing:
+            continue
+        item.delivery_exports.update(
+            write_delivery_exports(
+                Path(item.final_export_path),
+                output_root,
+                missing,
+                log_path=log_path,
+            )
+        )
+
+
 async def async_main(args: argparse.Namespace) -> int:
     out_root = Path(args.output_root).expanduser().resolve() if args.output_root else default_output_root()
     out_root.mkdir(parents=True, exist_ok=True)
     manifest_path = out_root / "manifest.json"
     log_path = out_root / "run.log"
+    delivery_formats = parse_delivery_formats(str(args.delivery_formats or ""))
 
     acquire_lock(out_root, force=bool(args.force_lock))
     append_log(log_path, f"lock_acquired output_root={out_root}")
@@ -441,7 +612,7 @@ async def async_main(args: argparse.Namespace) -> int:
             plan = [coerce_plan_item(item) for item in manifest.get("items", [])]
             append_log(log_path, f"resume_loaded items={len(plan)}")
         else:
-            plan = build_plan(out_root)
+            plan = build_plan(out_root, args.source or None)
             manifest = {
                 "generated_at": utc_now(),
                 "repo_root": str(REPO_ROOT),
@@ -467,13 +638,25 @@ async def async_main(args: argparse.Namespace) -> int:
                     "true_peak_dbtp": DEFAULT_TRUE_PEAK,
                     "control_profile": DEFAULT_CONTROL_PROFILE,
                 },
+                "source_overrides": list(args.source or []),
+                "delivery_formats": delivery_formats,
+                "delivery_note": (
+                    "24/32-bit files are delivery encodes from the MCP phase-aligned master artifact; "
+                    "they do not add local mastering."
+                ),
             }
             write_manifest(manifest_path, manifest, plan)
             append_log(log_path, f"fresh_plan_written items={len(plan)}")
+        manifest["delivery_formats"] = delivery_formats
+        manifest["delivery_note"] = (
+            "24/32-bit files are delivery encodes from the MCP phase-aligned master artifact; "
+            "they do not add local mastering."
+        )
 
         if args.dry_run:
+            total_count = len(plan)
             for item in plan:
-                append_log(log_path, f"dry_run {item.index}/10 {item.filename} exists={item.source_exists}")
+                append_log(log_path, f"dry_run {item.index}/{total_count} {item.filename} exists={item.source_exists}")
             return 0
 
         async with Client(server.mcp, name="AuralMind2-explicit-premium-trap", timeout=args.call_timeout) as client:
@@ -497,12 +680,16 @@ async def async_main(args: argparse.Namespace) -> int:
                 if item.status != "done" and (item.status != "error" or bool(args.retry_errors))
             ]
             append_log(log_path, f"queue_start total={len(plan)} to_run={len(to_run)}")
+            total_count = len(plan)
 
             for item in to_run:
                 try:
                     await run_one(
                         client,
                         item,
+                        total_count=total_count,
+                        delivery_formats=delivery_formats,
+                        output_root=out_root,
                         poll_s=float(args.poll_seconds),
                         max_wait_s=float(args.max_wait_seconds),
                         log_path=log_path,
@@ -513,6 +700,9 @@ async def async_main(args: argparse.Namespace) -> int:
                     append_log(log_path, f"error {item.index}/10 {item.display_name}: {item.error}")
                 finally:
                     write_manifest(manifest_path, manifest, plan)
+
+        ensure_delivery_exports(plan, out_root, delivery_formats, log_path=log_path)
+        write_manifest(manifest_path, manifest, plan)
 
         done = sum(1 for item in plan if item.status == "done")
         errors = sum(1 for item in plan if item.status == "error")
@@ -526,6 +716,18 @@ async def async_main(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Render explicit premium hi-fi trap masters through MCP only.")
     parser.add_argument("--output-root", type=str, default="")
+    parser.add_argument(
+        "--source",
+        action="append",
+        default=[],
+        help="Render this source path or data/ filename instead of the fixed 10-song queue. May be repeated.",
+    )
+    parser.add_argument(
+        "--delivery-formats",
+        type=str,
+        default="",
+        help="Comma-separated delivery formats to encode from the MCP artifact, e.g. 24,32.",
+    )
     parser.add_argument("--poll-seconds", type=float, default=3.0)
     parser.add_argument("--max-wait-seconds", type=float, default=60 * 60 * 4)
     parser.add_argument("--call-timeout", type=float, default=60 * 60 * 4)

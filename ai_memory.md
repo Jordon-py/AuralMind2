@@ -248,3 +248,10 @@
 - completed: Rendered the explicit 10-song premium hi-fi trap queue through AuralMind2 MCP only, including server-side `premium_phase_align` for every final master.
 - output: `masters/mcp_premium_hifi_trap_explicit_current/final` contains 10 phase-aligned WAV exports; `manifest.json` reports `done=10 error=0`.
 - repo state: pushed through commit `81dd067 fix: use valid premium trap prompt intensity`; full test suite passed with `23 passed` and Git was clean afterward.
+
+## 2026-04-24 FaceTime Same-Lane MCP Master
+- completed: Rendered `data/FaceTime (6).wav` through the same MCP-only premium hi-fi trap lane: `competitive_trap`, no stems, target `-12.2 LUFS`, and server-side `premium_phase_align`.
+- output: `masters/mcp_premium_hifi_trap_facetime_6_current` contains the MCP phase-aligned master plus 24-bit PCM and 32-bit float delivery WAVs.
+- metrics: final master measured `-15.01 LUFS`, `-0.97 dBTP`, and low-band phase correlation improved `0.9972 -> 0.9987`.
+- changed: `tools/run_explicit_premium_hifi_trap_batch.py` now supports `--source` for one-off renders and `--delivery-formats 24,32` for delivery encodes from the MCP artifact.
+- verified: `python -m pytest -q` passed with `23 passed`; delivery probes confirmed 24-bit PCM and 32-bit float stereo WAVs at 48 kHz.
