@@ -28,16 +28,21 @@
 - C:\Users\goku\Documents\AuralMind2\resources\premium_trap_workflow.md - MCP resource guiding connected AI clients toward premium trap/rap mastering decisions and quality gates.
 - C:\Users\goku\Documents\AuralMind2\archive\README.md - archive index explaining why legacy docs, notebooks, stale config, and duplicate engines were moved out of the repo root.
 - C:\Users\goku\Documents\AuralMind2\server.py - main MCP server implementation and likely local orchestration entrypoint
+- C:\Users\goku\Documents\AuralMind2\tools\run_explicit_premium_hifi_trap_batch.py - MCP-only explicit 10-song runner that connects with `fastmcp.Client`, uses server tools for analyze/plan/render/phase-align/export, and writes a resume manifest plus run log.
 - C:\Users\goku\Documents\AuralMind2\README.md - repo usage and operational context
 - C:\Users\goku\Documents\AuralMind2\ai_memory.md - repo-local execution memory for this mastering run
 
 ## Architecture / Data Flow Notes
+- [2026-04-24] Explicit premium trap batch flow is MCP-only: `fastmcp.Client(server.mcp)` -> `bootstrap` / resources / prompt -> `register_audio_from_path` -> `analyze_audio` -> `plan_mastering_strategy` / `propose_master_settings` -> `run_master_job` / `job_status` / `job_result` -> `premium_phase_align` -> `analyze_audio` -> `read_artifact` export.
+- [2026-04-24] Premium phase alignment is now a first-class MCP tool, `premium_phase_align`, which applies zero-phase low-band isolation and material-aware mono centering to the chosen mastered artifact before export.
 - [2026-04-23] MCP connect guidance now has three layers: `FastMCP(instructions=...)` for clients that honor server instructions, `on_connect` / `premium_trap_mastering_session` prompts for prompt-capable clients, and resources (`auralmind://connect-kit`, `auralmind://premium-trap-workflow`, `auralmind://contracts`, `auralmind://control-surface`) for clients that must fetch guidance explicitly.
 - [2026-04-23] Source audio policy is now local-assets-first: `data/` audio remains on disk for runners and MCP registration, but audio blobs are removed from Git tracking and represented by `docs/DATA-ASSET-MANIFEST.md`.
 - [2026-04-02] Live MCP surface confirms async jobs, closed-loop mastering, semantic strategy planning, control profiles, safe filesystem access, server-side ingest, and chunked uploads.
 - [2026-04-02] Core resources exposed by `AuralMind2`: `config://system-prompt`, `config://mcp-docs`, `config://maintainer-guide`, `config://server-info`, `auralmind://workflow`, `auralmind://metrics`, `auralmind://presets`, `auralmind://control-surface`, `auralmind://contracts`, `auralmind://connect-kit`.
 
 ## Progress Log
+- [2026-04-24] changed: added MCP tool `premium_phase_align` to `server.py`, updated `resources/premium_trap_workflow.md`, and added `tools/run_explicit_premium_hifi_trap_batch.py` so the requested 10-song batch uses the MCP server only for planning, mastering, phase alignment, analysis, and artifact export.
+- [2026-04-24] verified: `python -m py_compile server.py tools\\run_explicit_premium_hifi_trap_batch.py`, `python -m pytest tests\\test_discovery_smoke.py -q`, and `python -m pytest -q` passed; FastMCP client discovery reported 37 tools including `premium_phase_align`; dry-run confirmed all 10 requested source files exist.
 - [2026-04-23] completed: initiated repo-info cleanup for AuralMind2, created `docs/REPO-INFO.md`, expanded `.gitignore` for generated audio/runtime/cache outputs, removed generated cache folders outside `.venv`, and moved root bloat into `archive/` buckets instead of deleting potentially useful history.
 - [2026-04-23] changed: moved exploratory notebooks to `archive/notebooks_20260423/`, older delivery docs to `archive/legacy_docs_20260423/`, duplicate legacy engine `auralmind_match_maestro_v7_3_expert1.py.py` to `archive/legacy_engines_20260423/`, and stale duplicate `gitignore` to `archive/stale_config_20260423/`.
 - [2026-04-23] note: live AuralMind2 FastMCP stdio processes were detected during cleanup, so active runtime files, active output folders, source audio, and server/job code were intentionally left untouched.

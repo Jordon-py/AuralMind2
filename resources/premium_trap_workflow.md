@@ -1,6 +1,6 @@
 # Premium Trap Workflow
 
-Top-level documentation: this resource guides MCP clients through premium trap and rap mastering with AuralMind2. Data shapes include `aud_*` source handles, `art_*` artifacts, `job_*` async jobs, `MasterSettings`, `MasteringControlProfile`, metrics JSON, and rendered audio artifacts. Important functions: `server.py:3775 plan_mastering_strategy`, `server.py:3781 propose_master_settings`, `server.py:3787 run_master_job`, `server.py:3815 job_status`, `server.py:3837 job_result`, and `tools/auralmind_maestro.py:2804 master`. Possible bugs: clients may chase loudness before checking harshness, mono low-end discipline, or vocal presence; stale job IDs can look active if not confirmed through `job_status`. Two extensions: add a dedicated premium-trap QC report model, and expose a delivery-finish tool for exact 24-bit/32-bit release exports.
+Top-level documentation: this resource guides MCP clients through premium trap and rap mastering with AuralMind2. Data shapes include `aud_*` source handles, `art_*` artifacts, `job_*` async jobs, `MasterSettings`, `MasteringControlProfile`, metrics JSON, and rendered audio artifacts. Important functions: `server.py:3819 plan_mastering_strategy`, `server.py:3825 propose_master_settings`, `server.py:3831 run_master_job`, `server.py:3859 job_status`, `server.py:3881 job_result`, `server.py:4418 premium_phase_align`, and `tools/auralmind_maestro.py:2804 master`. Possible bugs: clients may chase loudness before checking harshness, mono low-end discipline, phase alignment, or vocal presence; stale job IDs can look active if not confirmed through `job_status`. Two extensions: add a dedicated premium-trap QC report model, and expose a delivery-finish tool for exact 24-bit/32-bit release exports.
 
 ## Intent
 
@@ -14,8 +14,9 @@ Use this workflow when the user asks for trap, rap, hip-hop, 808-heavy, premium,
 4. Use `plan_mastering_strategy` for natural-language goals.
 5. Use `propose_master_settings` before execution when the client composes or modifies settings.
 6. Use `run_master_job` for normal renders and poll with `job_status`.
-7. Fetch `job_result`, then evaluate with `analyze_audio` or `compare_audio_metrics`.
-8. Apply one intervention at a time only when the pass is close.
+7. Fetch `job_result`, then run `premium_phase_align` on the chosen master artifact for explicit 808/sub phase alignment.
+8. Evaluate the phase-aligned artifact with `analyze_audio` or `compare_audio_metrics`.
+9. Apply one intervention at a time only when the pass is close.
 
 ## Premium Trap Defaults
 
@@ -24,6 +25,7 @@ Use this workflow when the user asks for trap, rap, hip-hop, 808-heavy, premium,
 - Stem policy: start with `stem_mode="auto"` unless the user requires no-stems or stems-on.
 - Control bias: positive `low_end_focus`, moderate `movement_amount`, moderate `harshness_control`, restrained `spatial_width` when bass or mono translation is risky.
 - Bit depth: use `float32` for MCP artifacts unless a repo-local delivery runner is handling exact 24-bit/32-bit exports.
+- Phase alignment: for trap finals, run `premium_phase_align` before exporting the final artifact.
 
 ## Quality Gates
 

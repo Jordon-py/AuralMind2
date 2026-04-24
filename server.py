@@ -23,9 +23,10 @@ environment variables.
 Data shapes: Pydantic request/response models (`MasterRequest`,
 `JobStatusOut`, `ArtifactReadResult`), dataclass runtime state (`JobState`,
 `ArtifactEntry`), and Maestro preset dataclasses from `tools/auralmind_maestro.py`.
-Important functions: `get_premium_trap_workflow_resource` at line 3284,
-`premium_trap_mastering_session_prompt` at line 3424, `run_master_job` at
-line 3787, `job_status` at line 3815, and `master_audio` at line 3987.
+Important functions: `get_premium_trap_workflow_resource` at line 3328,
+`premium_trap_mastering_session_prompt` at line 3468, `run_master_job` at
+line 3831, `job_status` at line 3859, `master_audio` at line 4031, and
+`premium_phase_align` at line 4418.
 Possible bugs: stale persisted job rows can outlive worker processes, and tests
 may use smaller fake preset dataclasses than the full Maestro engine.
 Enhancement paths: split contracts/resources/tools into modules, and move job
@@ -1087,6 +1088,37 @@ class RhythmFeelEnhanceOut(StrictBaseModel):
     applied_settings: RhythmFeelAppliedSettings
     notes: str = Field(..., description="Human-readable description of what was applied.")
 
+
+class PremiumPhaseAlignIn(StrictBaseModel):
+    audio_id: str = Field(..., description="Audio or mastered artifact handle to phase-align.")
+    cutoff_hz: float = Field(
+        155.0,
+        ge=70.0,
+        le=220.0,
+        description="Low-band cutoff used for premium sub/808 phase alignment.",
+    )
+    blend: Optional[float] = Field(
+        None,
+        ge=0.50,
+        le=1.0,
+        description="Optional mono-centering blend for the low band. None selects a material-aware value.",
+    )
+
+
+class PremiumPhaseAlignOut(StrictBaseModel):
+    source_audio_id: str
+    artifact_id: str
+    method: str
+    cutoff_hz: float
+    blend: float
+    low_corr_before: float
+    low_corr_after: float
+    high_corr_before: float
+    high_corr_after: float
+    gain_trim_db: float
+    notes: str
+
+
 class MusicalEqIn(StrictBaseModel):
     audio_id: str = Field(..., description="ID of the audio artifact to process.")
     key: str = Field(..., description="The musical key (e.g., 'C', 'G#').")
@@ -1325,8 +1357,9 @@ def _build_connect_packet(preview_limit: int = CONNECT_PREVIEW_LIMIT) -> Connect
         "6. Rhythm feel: run enhance_rhythm_feel for a subtle premium polish artifact; the master engine also applies this pass on every render",
         "7. Plan: use plan_mastering_strategy for semantic goals or propose_master_settings for explicit settings",
         "8. Execute: run_master_job, master_audio, or master_closed_loop",
-        "9. Evaluate: job_status + job_result, then analyze_audio or compare_audio_metrics on returned artifacts",
-        "10. Intervene if needed: semantic_a_b_mastering, start_interactive_mastering, analyze_and_optimize_governor, ai_stem_remix, or creative DSP tools before re-analyzing and finalizing",
+        "9. Phase-align: for trap/rap finals, run premium_phase_align on the chosen master artifact before export",
+        "10. Evaluate: job_status + job_result, then analyze_audio or compare_audio_metrics on returned artifacts",
+        "11. Intervene if needed: semantic_a_b_mastering, start_interactive_mastering, analyze_and_optimize_governor, ai_stem_remix, or creative DSP tools before re-analyzing and finalizing",
     ]
 
     example_calls: Dict[str, Any] = {
@@ -1341,6 +1374,10 @@ def _build_connect_packet(preview_limit: int = CONNECT_PREVIEW_LIMIT) -> Connect
             "protect_low_end": True,
             "section_aware": True,
             "hook_protection": True,
+        },
+        "premium_phase_align": {
+            "audio_id": "art_1234567890ab",
+            "cutoff_hz": 155.0,
         },
         "plan_mastering_strategy": {
             "audio_id": "aud_1234567890ab",
@@ -1448,6 +1485,14 @@ def _tool_catalog_entries() -> List[ToolCatalogEntry]:
             output_model="RhythmFeelEnhanceOut",
             best_when="Use after analyze_audio and before strategy/render when you want an explicit polished source artifact; every master also runs this internally.",
             avoid_when="Do not use as timing correction or composition editing; this is a conservative mastering polish pass only.",
+        ),
+        ToolCatalogEntry(
+            name="premium_phase_align",
+            description="Apply premium low-band phase alignment and mono-safe sub centering",
+            input_model="PremiumPhaseAlignIn",
+            output_model="PremiumPhaseAlignOut",
+            best_when="Use after a trap/rap master when the final artifact needs explicit 808/sub phase alignment before export.",
+            avoid_when="Skip for non-music artifacts or when the caller wants the untouched raw master artifact.",
         ),
         ToolCatalogEntry(name="list_presets", description="List mastering presets", input_model="Empty", output_model="PresetsOut"),
         ToolCatalogEntry(
@@ -4366,6 +4411,78 @@ def _store_audio_artifact(
         filename=filename,
         data_filename=data_filename,
         media_type=_guess_media_type(filename, fallback="audio/wav"),
+    )
+
+
+@mcp.tool()
+def premium_phase_align(
+    req: PremiumPhaseAlignIn,
+    ctx: Context = NO_CONTEXT,
+) -> PremiumPhaseAlignOut:
+    """
+    Apply an MCP-native premium phase-alignment pass.
+
+    The pass uses zero-phase low-band isolation, material-aware mono-centering,
+    and a conservative gain trim so trap 808/sub energy is centered without
+    widening or retiming the full mix.
+    """
+    session_key, session_dir, entry, maestro, audio, sr, _ = _load_audio_artifact(req.audio_id, ctx)
+    y = maestro.ensure_stereo(audio).astype(np.float32)
+    cutoff = round(max(70.0, min(220.0, float(req.cutoff_hz))), 2)
+    low_corr_before = float(maestro.corrcoef_band(y, sr, 25.0, cutoff))
+    high_corr_before = float(maestro.corrcoef_band(y, sr, 2000.0, min(12000.0, 0.45 * sr)))
+
+    nyq = max(1.0, 0.5 * float(sr))
+    sos = maestro.sps.butter(4, min(cutoff / nyq, 0.9), btype="lowpass", output="sos")
+    try:
+        low = maestro.sps.sosfiltfilt(sos, y, axis=0).astype(np.float32)
+    except ValueError:
+        low = maestro.sps.sosfilt(sos, y, axis=0).astype(np.float32)
+    high = (y - low).astype(np.float32)
+
+    if req.blend is None:
+        if low_corr_before < 0.80:
+            blend = 1.0
+        elif low_corr_before < 0.94:
+            blend = 0.86
+        else:
+            blend = 0.72
+    else:
+        blend = float(req.blend)
+
+    mono_low = np.repeat(np.mean(low, axis=1, keepdims=True), 2, axis=1).astype(np.float32)
+    aligned = (high + ((1.0 - blend) * low + blend * mono_low)).astype(np.float32)
+    peak = float(np.max(np.abs(aligned))) if aligned.size else 0.0
+    gain_trim_db = 0.0
+    if peak > 0.999:
+        gain = 0.999 / max(peak, 1e-9)
+        gain_trim_db = float(20.0 * np.log10(max(gain, 1e-9)))
+        aligned = (aligned * gain).astype(np.float32)
+
+    artifact = _store_audio_artifact(
+        session_key,
+        session_dir,
+        maestro,
+        aligned,
+        int(sr),
+        filename=f"{os.path.splitext(entry.filename)[0]}_premium_phase_aligned.wav",
+        kind="mastered_audio",
+    )
+    low_corr_after = float(maestro.corrcoef_band(aligned, sr, 25.0, cutoff))
+    high_corr_after = float(maestro.corrcoef_band(aligned, sr, 2000.0, min(12000.0, 0.45 * sr)))
+
+    return PremiumPhaseAlignOut(
+        source_audio_id=req.audio_id,
+        artifact_id=artifact.artifact_id,
+        method="zero_phase_low_band_mono_center_blend",
+        cutoff_hz=cutoff,
+        blend=round(float(blend), 3),
+        low_corr_before=round(low_corr_before, 4),
+        low_corr_after=round(low_corr_after, 4),
+        high_corr_before=round(high_corr_before, 4),
+        high_corr_after=round(high_corr_after, 4),
+        gain_trim_db=round(gain_trim_db, 4),
+        notes="Applied MCP-native premium phase alignment for centered 808/sub translation.",
     )
 
 
