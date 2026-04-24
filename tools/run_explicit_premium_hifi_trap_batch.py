@@ -320,7 +320,7 @@ async def run_one(
             "file_uri": item.filename,
             "goal": "premium hi-fidelity AI-integrated trap master with premium phase alignment",
             "platform": DEFAULT_PLATFORM,
-            "intensity": "premium",
+            "intensity": "balanced",
         },
     )
 
