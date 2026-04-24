@@ -7,6 +7,7 @@ Last updated: March 11, 2026
 - `server.py` is the authoritative MCP server contract.
 - `tools/auralmind_maestro.py` is the authoritative DSP/mastering engine.
 - `auralmind_match_maestro_v7_3.py` is a compatibility wrapper only.
+- `resources/premium_trap_workflow.md` is the additive client playbook for trap/rap mastering guidance.
 
 If behavior changes, update `server.py`, the bundled docs resources, and the tests together.
 
@@ -73,12 +74,14 @@ Rule of thumb:
 
 - Keep tool signatures aligned with the contracts published in `auralmind://contracts`.
 - If a tool advertises a Pydantic model, implement the tool with that model instead of a flat signature.
+- Prefer explicit request/response wrappers for public MCP tools, especially when a tool can return more than a bare metric blob.
 - Update these surfaces together when adding or changing behavior:
   - tool function
   - resource catalog
   - contract resource
   - README / MCP docs
   - tests
+- For AI guidance changes, keep `FastMCP(instructions=...)`, `on_connect`, `auralmind://connect-kit`, `resources/system_prompt.md`, and `resources/mcp_docs.md` aligned.
 
 ## Testing strategy
 

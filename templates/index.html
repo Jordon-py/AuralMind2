@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AuralMind2 Premium Mastering</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 100%);
+            color: #e0e0e0;
+            min-height: 100vh;
+            padding: 40px 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 40px;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            font-weight: 300;
+            letter-spacing: 2px;
+            color: #00d4ff;
+            margin-bottom: 5px;
+        }
+
+        .header p {
+            font-size: 0.95em;
+            color: #888;
+            letter-spacing: 1px;
+        }
+
+        .workspace {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+            margin-bottom: 30px;
+        }
+
+        .panel {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(0, 212, 255, 0.1);
+            border-radius: 8px;
+            padding: 30px;
+            backdrop-filter: blur(10px);
+        }
+
+        .panel-title {
+            font-size: 0.9em;
+            letter-spacing: 1px;
+            color: #888;
+            margin-bottom: 20px;
+            text-transform: uppercase;
+        }
+
+        /* Levels Panel */
+        .levels-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+        }
+
+        .level-item {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .level-label {
+            font-size: 0.85em;
+            color: #999;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .level-value {
+            font-size: 1.8em;
+            font-weight: 300;
+            color: #00d4ff;
+            margin-bottom: 8px;
+            font-family: 'Monaco', monospace;
+        }
+
+        .level-bar {
+            width: 100%;
+            height: 6px;
+            background: rgba(0, 212, 255, 0.1);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .level-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #00d4ff 0%, #0099cc 100%);
+            width: 0%;
+            transition: width 0.1s ease-out;
+            border-radius: 3px;
+        }
+
+        /* Spectrogram Panel */
+        .spectrogram {
+            width: 100%;
+            height: 300px;
+            position: relative;
+        }
+
+        #spectrogramPlot {
+            width: 100% !important;
+            height: 100% !important;
+        }
+
+        /* Control Panel */
+        .full-width {
+            grid-column: 1 / -1;
+        }
+
+        .control-group {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .file-input-wrapper {
+            position: relative;
+            display: inline-block;
+            width: 100%;
+        }
+
+        input[type="file"] {
+            display: none;
+        }
+
+        .file-input-label {
+            display: block;
+            padding: 12px 20px;
+            background: rgba(0, 212, 255, 0.1);
+            border: 1px dashed rgba(0, 212, 255, 0.3);
+            border-radius: 4px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 0.9em;
+            color: #999;
+        }
+
+        .file-input-label:hover {
+            background: rgba(0, 212, 255, 0.15);
+            border-color: rgba(0, 212, 255, 0.5);
+        }
+
+        button {
+            padding: 12px 20px;
+            background: rgba(0, 212, 255, 0.1);
+            border: 1px solid rgba(0, 212, 255, 0.3);
+            color: #00d4ff;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9em;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            transition: all 0.3s ease;
+            font-family: inherit;
+        }
+
+        button:hover {
+            background: rgba(0, 212, 255, 0.2);
+            border-color: rgba(0, 212, 255, 0.6);
+        }
+
+        button:active {
+            transform: scale(0.98);
+        }
+
+        button.primary {
+            background: rgba(0, 212, 255, 0.15);
+            color: #00d4ff;
+        }
+
+        button.primary:hover {
+            background: rgba(0, 212, 255, 0.25);
+        }
+
+        /* Progress */
+        .progress-section {
+            display: none;
+        }
+
+        .progress-section.active {
+            display: block;
+        }
+
+        .progress-bar-container {
+            width: 100%;
+            height: 4px;
+            background: rgba(0, 212, 255, 0.1);
+            border-radius: 2px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+
+        .progress-bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #00d4ff 0%, #0099cc 100%);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+
+        .status-text {
+            font-size: 0.85em;
+            color: #888;
+            margin-top: 10px;
+        }
+
+        /* Footer */
+        .footer {
+            text-align: center;
+            color: #666;
+            font-size: 0.85em;
+            margin-top: 40px;
+        }
+
+        /* Responsive */
+        @media (max-width: 1024px) {
+            .workspace {
+                grid-template-columns: 1fr;
+            }
+
+            .control-group {
+                grid-template-columns: 1fr;
+            }
+
+            .header h1 {
+                font-size: 2em;
+            }
+        }
+
+        /* Animations */
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+
+        .mastering .status-text {
+            animation: pulse 1s infinite;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>AuralMind2 Premium</h1>
+            <p>Real-Time Mastering Visualization</p>
+        </div>
+
+        <div class="workspace">
+            <!-- Controls Panel -->
+            <div class="panel full-width">
+                <div class="panel-title">Master Configuration</div>
+                <div class="control-group">
+                    <div class="file-input-wrapper">
+                        <input type="file" id="audioFile" accept=".wav,.mp3,.flac">
+                        <label for="audioFile" class="file-input-label">
+                            📁 Select Audio File
+                        </label>
+                    </div>
+                    <select id="presetSelect" style="padding: 12px 20px; background: rgba(0, 212, 255, 0.1); border: 1px solid rgba(0, 212, 255, 0.3); border-radius: 4px; color: #00d4ff; font-family: inherit;">
+                        <option value="">-- Select Preset --</option>
+                        <option value="hi_fi_streaming">HiFi Streaming</option>
+                        <option value="competitive_trap">Trap Competitive</option>
+                        <option value="club">Club Ready</option>
+                        <option value="radio_loud">Radio Loud</option>
+                        <option value="cinematic">Cinematic</option>
+                    </select>
+                    <button class="primary" onclick="startMastering()">▶ Start Mastering</button>
+                </div>
+            </div>
+
+            <!-- Levels Panel -->
+            <div class="panel">
+                <div class="panel-title">Loudness Metrics</div>
+                <div class="levels-grid">
+                    <div class="level-item">
+                        <div class="level-label">LUFS</div>
+                        <div class="level-value" id="lufsValue">-23.00</div>
+                        <div class="level-bar">
+                            <div class="level-fill" id="lufsFill" style="width: 45%;"></div>
+                        </div>
+                    </div>
+                    <div class="level-item">
+                        <div class="level-label">True Peak</div>
+                        <div class="level-value" id="peakValue">-0.10</div>
+                        <div class="level-bar">
+                            <div class="level-fill" id="peakFill" style="width: 51%;"></div>
+                        </div>
+                    </div>
+                    <div class="level-item">
+                        <div class="level-label">Crest (dB)</div>
+                        <div class="level-value" id="crestValue">19.33</div>
+                        <div class="level-bar">
+                            <div class="level-fill" id="crestFill" style="width: 64%;"></div>
+                        </div>
+                    </div>
+                    <div class="level-item">
+                        <div class="level-label">Stereo Corr.</div>
+                        <div class="level-value" id="corrValue">0.872</div>
+                        <div class="level-bar">
+                            <div class="level-fill" id="corrFill" style="width: 87%;"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Spectrogram Panel -->
+            <div class="panel full-width">
+                <div class="panel-title">Frequency Analysis</div>
+                <div class="spectrogram" id="spectrogramContainer">
+                    <div id="spectrogramPlot"></div>
+                </div>
+            </div>
+
+            <!-- Progress Panel -->
+            <div class="panel full-width progress-section" id="progressPanel">
+                <div class="panel-title">Mastering Progress</div>
+                <div class="progress-bar-container">
+                    <div class="progress-bar-fill" id="progressFill"></div>
+                </div>
+                <div class="status-text" id="statusText">Initializing mastering...</div>
+            </div>
+        </div>
+
+        <div class="footer">
+            <p>AuralMind2 © 2025 | Professional Mastering Engine</p>
+        </div>
+    </div>
+
+    <script>
+        let currentSessionId = null;
+        let spectrogramInitialized = false;
+        let activePollTimer = null;
+
+        // Initialize default spectrogram
+        function initializeSpectrogram() {
+            if (spectrogramInitialized) return;
+
+            const frequencies = Array.from({length: 256}, (_, i) => i * 93.75); // 24000Hz / 256
+            const times = Array.from({length: 100}, (_, i) => i * 0.1);
+            const magnitude = Array(times.length).fill(0).map(() =>
+                Array(frequencies.length).fill(-80).map(() => -80 + Math.random() * 20)
+            );
+
+            const colorscale = [
+                [0, 'rgb(10, 14, 39)'],
+                [0.5, 'rgb(0, 150, 200)'],
+                [1, 'rgb(0, 212, 255)']
+            ];
+
+            const data = [{
+                x: times,
+                y: frequencies,
+                z: magnitude,
+                type: 'heatmap',
+                colorscale: colorscale,
+                showscale: false,
+                hoverongaps: false
+            }];
+
+            const layout = {
+                title: '',
+                xaxis: { title: 'Time (s)', color: '#666', gridcolor: 'rgba(0,212,255,0.1)' },
+                yaxis: { title: 'Frequency (Hz)', color: '#666', gridcolor: 'rgba(0,212,255,0.1)' },
+                plot_bgcolor: 'rgba(10,14,39,0.5)',
+                paper_bgcolor: 'transparent',
+                margin: { l: 60, r: 20, t: 20, b: 60 },
+                font: { family: 'Segoe UI, sans-serif', color: '#999', size: 11 }
+            };
+
+            const config = { responsive: true, displayModeBar: false };
+            Plotly.newPlot('spectrogramPlot', data, layout, config);
+            spectrogramInitialized = true;
+        }
+
+        // Update metrics display
+        function updateMetrics(metrics) {
+            // LUFS: Range -23 to -11 (normalize to 0-100%)
+            const lufsNorm = Math.max(0, Math.min(100, ((-11 - metrics.lufs) / 12) * 100));
+            document.getElementById('lufsValue').textContent = metrics.lufs.toFixed(2);
+            document.getElementById('lufsFill').style.width = lufsNorm + '%';
+
+            // True Peak: Range -3 to 0 (normalize to 0-100%)
+            const peakNorm = Math.max(0, Math.min(100, (metrics.true_peak + 3) * 33.33));
+            document.getElementById('peakValue').textContent = metrics.true_peak.toFixed(2);
+            document.getElementById('peakFill').style.width = peakNorm + '%';
+
+            // Crest: Range 5 to 24 dB (normalize to 0-100%)
+            const crestNorm = Math.max(0, Math.min(100, ((metrics.crest_db - 5) / 19) * 100));
+            document.getElementById('crestValue').textContent = metrics.crest_db.toFixed(2);
+            document.getElementById('crestFill').style.width = crestNorm + '%';
+
+            // Stereo Correlation: 0 to 1 (already normalized)
+            document.getElementById('corrValue').textContent = metrics.stereo_corr.toFixed(3);
+            document.getElementById('corrFill').style.width = (metrics.stereo_corr * 100) + '%';
+        }
+
+        // Update spectrogram
+        function updateSpectrogram(data) {
+            if (!data || !data.magnitude) return;
+
+            const spectrogramData = [{
+                x: data.times,
+                y: data.frequencies,
+                z: data.magnitude,
+                type: 'heatmap',
+                colorscale: [
+                    [0, 'rgb(10, 14, 39)'],
+                    [0.5, 'rgb(0, 150, 200)'],
+                    [1, 'rgb(0, 212, 255)']
+                ],
+                showscale: false
+            }];
+
+            const layout = {
+                title: '',
+                xaxis: { title: 'Time (s)', color: '#666' },
+                yaxis: { title: 'Frequency (Hz)', color: '#666' },
+                plot_bgcolor: 'rgba(10,14,39,0.5)',
+                paper_bgcolor: 'transparent',
+                margin: { l: 60, r: 20, t: 20, b: 60 }
+            };
+
+            Plotly.restyle('spectrogramPlot', spectrogramData[0]);
+        }
+
+        // File selection
+        document.getElementById('audioFile').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (file) {
+                document.querySelector('.file-input-label').textContent = '✓ ' + file.name;
+            }
+        });
+
+        async function uploadAndCreateSession(file) {
+            const formData = new FormData();
+            formData.append('file', file);
+
+            const uploadResponse = await fetch('/api/upload', {
+                method: 'POST',
+                body: formData
+            });
+
+            const uploadPayload = await uploadResponse.json();
+            if (!uploadResponse.ok || !uploadPayload.success) {
+                throw new Error(uploadPayload.error || 'Upload failed');
+            }
+
+            const sessionResponse = await fetch('/api/session/new', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    audio_path: uploadPayload.audio_path,
+                    song_name: uploadPayload.song_name
+                })
+            });
+
+            const sessionPayload = await sessionResponse.json();
+            if (!sessionResponse.ok || !sessionPayload.success) {
+                throw new Error(sessionPayload.error || 'Failed to create session');
+            }
+
+            return sessionPayload;
+        }
+
+        async function loadSessionSpectrogram(sessionId) {
+            const spectroResponse = await fetch(`/api/session/${sessionId}/spectrogram`);
+            if (!spectroResponse.ok) {
+                return;
+            }
+            const spectroData = await spectroResponse.json();
+            updateSpectrogram(spectroData);
+        }
+
+        async function startMastering() {
+            const fileInput = document.getElementById('audioFile');
+            const presetSelect = document.getElementById('presetSelect');
+
+            if (!fileInput.files[0]) {
+                alert('Please select an audio file');
+                return;
+            }
+
+            if (!presetSelect.value) {
+                alert('Please select a preset');
+                return;
+            }
+
+            try {
+                if (activePollTimer) {
+                    clearTimeout(activePollTimer);
+                    activePollTimer = null;
+                }
+
+                document.getElementById('progressPanel').classList.add('active');
+                document.getElementById('progressFill').style.width = '0%';
+                document.getElementById('statusText').textContent = 'Uploading audio and preparing session...';
+
+                const session = await uploadAndCreateSession(fileInput.files[0]);
+                currentSessionId = session.session_id;
+                updateMetrics(session.metrics);
+                await loadSessionSpectrogram(currentSessionId);
+
+                const startResponse = await fetch(`/api/session/${currentSessionId}/start`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        preset: presetSelect.value,
+                        workflow: 'standard'
+                    })
+                });
+
+                const startPayload = await startResponse.json();
+                if (!startResponse.ok || !startPayload.success) {
+                    throw new Error(startPayload.error || 'Failed to launch mastering');
+                }
+
+                updateMetrics(startPayload.metrics);
+                monitorMastering();
+            } catch (error) {
+                console.error('Error:', error);
+                document.getElementById('statusText').textContent = `Error: ${error.message}`;
+                alert('Error starting mastering: ' + error.message);
+            }
+        }
+
+        async function monitorMastering() {
+            if (!currentSessionId) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/session/${currentSessionId}/status`);
+                const payload = await response.json();
+                if (!response.ok) {
+                    throw new Error(payload.error || 'Failed to load session status');
+                }
+
+                updateMetrics(payload.metrics);
+                document.getElementById('progressFill').style.width = `${payload.progress || 0}%`;
+
+                if (payload.status === 'done') {
+                    document.getElementById('statusText').textContent =
+                        payload.output_file
+                            ? `Mastering complete. Exported to ${payload.output_file}`
+                            : 'Mastering complete.';
+                    activePollTimer = null;
+                    return;
+                }
+
+                if (payload.status === 'error') {
+                    document.getElementById('statusText').textContent =
+                        `Mastering failed: ${payload.error || 'Unknown error'}`;
+                    activePollTimer = null;
+                    return;
+                }
+
+                document.getElementById('statusText').textContent =
+                    `Mastering ${payload.status}... ${payload.progress || 0}%`;
+
+                activePollTimer = window.setTimeout(monitorMastering, 1200);
+            } catch (error) {
+                console.error('Monitoring error:', error);
+                document.getElementById('statusText').textContent = `Monitoring error: ${error.message}`;
+                activePollTimer = null;
+            }
+        }
+
+        // Initialize on load
+        window.addEventListener('load', initializeSpectrogram);
+    </script>
+</body>
+</html>

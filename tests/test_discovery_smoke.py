@@ -18,7 +18,17 @@ class DiscoverySmokeTests(unittest.TestCase):
         resource_uris = {resource.uri for resource in server.bootstrap().resources}
         self.assertIn("auralmind://connect-kit", resource_uris)
         self.assertIn("auralmind://control-surface", resource_uris)
+        self.assertIn("auralmind://premium-trap-workflow", resource_uris)
         self.assertIn("config://maintainer-guide", resource_uris)
+
+    def test_bootstrap_prompts_include_premium_trap_session(self) -> None:
+        prompt_names = {prompt.name for prompt in server.bootstrap().prompts}
+        self.assertIn("premium_trap_mastering_session", prompt_names)
+
+    def test_fastmcp_instructions_guide_clients_to_contracts_and_async_jobs(self) -> None:
+        self.assertIn("auralmind://contracts", server.mcp.instructions)
+        self.assertIn("auralmind://premium-trap-workflow", server.mcp.instructions)
+        self.assertIn("run_master_job", server.mcp.instructions)
 
     def test_server_info_includes_version_and_supported_transports(self) -> None:
         payload = json.loads(server.get_server_info())
@@ -93,6 +103,18 @@ class DiscoverySmokeTests(unittest.TestCase):
         prompt = server.get_system_prompt()
         self.assertTrue(prompt.strip())
         self.assertIn("AuralMind", prompt)
+
+    def test_premium_trap_workflow_resource_is_available(self) -> None:
+        guide = server.get_premium_trap_workflow_resource()
+        self.assertIn("Premium Trap Workflow", guide)
+        self.assertIn("run_master_job", guide)
+        self.assertIn("Quality Gates", guide)
+
+    def test_premium_trap_prompt_points_to_guidance_and_async_lifecycle(self) -> None:
+        text = self._run_async(server.premium_trap_mastering_session_prompt("song.wav"))
+        self.assertIn("auralmind://premium-trap-workflow", text)
+        self.assertIn("run_master_job", text)
+        self.assertIn("job_status", text)
 
     def test_workflow_resource_matches_connect_packet(self) -> None:
         workflow_payload = json.loads(self._run_async(server.get_workflow_resource()))

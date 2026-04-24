@@ -1,14 +1,14 @@
 # AuralMind2
 
-Last updated: March 11, 2026
+Last updated: April 23, 2026
 
-AuralMind2 is a FastMCP mastering server for remote MCP clients and agentic music workflows. It exposes a session-scoped audio pipeline over `streamable-http`, keeps `stdio` available for local desktop clients, and is now structured around one consistent contract for semantic planning, bounded LLM control, mastering jobs, and artifact retrieval.
+AuralMind2 is a FastMCP mastering server for remote MCP clients and agentic music workflows. It now defaults to `stdio` for local desktop clients, keeps `streamable-http` available for hosted or remote clients, and is structured around one consistent contract for semantic planning, bounded LLM control, mastering jobs, and artifact retrieval.
 
 ## What this server exposes
 
-- `35` tools for ingest, analysis, semantic planning, session-state discovery, mastering, artifact access, and advanced AI-assisted workflows
-- `10` resources for onboarding, contracts, presets, metrics, control-surface guidance, and maintainer documentation
-- `4` prompts for connect-time guidance and legacy strategy generation
+- Runtime-discovered tools for ingest, analysis, semantic planning, session-state discovery, mastering, artifact access, and advanced AI-assisted workflows
+- Runtime-discovered resources for onboarding, contracts, presets, metrics, control-surface guidance, premium trap guidance, and maintainer documentation
+- Runtime-discovered prompts for connect-time guidance, premium trap operation, single-pass plans, closed-loop plans, and legacy strategy generation
 - Strict Pydantic v2 contracts for every request/response shape published through `auralmind://contracts`
 
 ## Architecture
@@ -21,6 +21,8 @@ Canonical runtime files:
   The real DSP/mastering engine used by the server.
 - `resources/mcp_docs.md`
   LLM/operator manual for driving the server as an MCP tool.
+- `resources/premium_trap_workflow.md`
+  Trap/rap mastering playbook for connected AI clients that need premium, release-ready guidance.
 - `resources/maintainer_guide.md`
   Human maintainer guide for architecture, extension points, and design rules.
 - `auralmind_match_maestro_v7_3.py`
@@ -54,7 +56,15 @@ Canonical runtime files:
 2. Call `master_closed_loop` with `goal`, `platform`, and optional `control_profile`.
 3. Fetch the winning master plus the runner summary artifact.
 
-### 3. Deep-control mastering
+### 3. Premium trap mastering
+
+1. Read `auralmind://premium-trap-workflow` or use the `premium_trap_mastering_session` prompt.
+2. Register or upload the source and call `analyze_audio`.
+3. Use `plan_mastering_strategy` unless exact settings are already known.
+4. Prefer `run_master_job` for long renders, then poll `job_status` and fetch `job_result`.
+5. Evaluate loudness, true peak, crest, stereo correlation, vocal clarity, low-end mono discipline, and high-end harshness before finalizing.
+
+### 4. Deep-control mastering
 
 Use `control_profile` when the intent is semantic but you still want bounded steerability:
 
@@ -93,6 +103,7 @@ Precedence is:
 - `auralmind://metrics`
 - `auralmind://presets`
 - `auralmind://control-surface`
+- `auralmind://premium-trap-workflow`
 - `auralmind://contracts`
 - `config://system-prompt`
 - `config://mcp-docs`
@@ -101,7 +112,8 @@ Precedence is:
 
 ## Runtime defaults
 
-- Transport: `streamable-http`
+- Transport: `stdio`
+- HTTP override transport: `streamable-http`
 - Host: `0.0.0.0`
 - Port: `8080`
 - MCP path: `/mcp`
@@ -137,6 +149,7 @@ uv sync
 HTTP mode:
 
 ```bash
+export ACTIVE_TRANSPORT=streamable-http
 python3 server.py
 ```
 
@@ -149,7 +162,6 @@ uvicorn server:app --host 0.0.0.0 --port 8080
 Local desktop MCP mode:
 
 ```bash
-export ACTIVE_TRANSPORT=stdio
 python3 server.py
 ```
 
@@ -182,16 +194,18 @@ python3 -m pytest -q
 - Start command: `uvicorn server:app --host 0.0.0.0 --port $PORT`
 - MCP endpoint: `https://<service>.onrender.com/mcp`
 - Health endpoint: `https://<service>.onrender.com/health`
+- Required env: `ACTIVE_TRANSPORT=streamable-http`
 
 The repo includes a matching `render.yaml`.
 
 ### FastMCP / Horizon
 
 - Entrypoint: `server.py:mcp`
-- Transport: `streamable-http`
-- Host: `0.0.0.0`
-- Port: `8080`
-- Path: `/mcp`
+- Default transport: `stdio`
+- HTTP override transport: `streamable-http`
+- HTTP host: `0.0.0.0`
+- HTTP port: `8080`
+- HTTP path: `/mcp`
 
 ## Notes
 

@@ -11,7 +11,24 @@ This document is written for MCP clients, orchestration agents, and LLMs driving
 - Use `list_session_state` to inspect the current session before assuming a remembered handle still exists.
 - Use contracts from `auralmind://contracts` instead of guessing payload shapes.
 - Prefer semantic planning first, raw overrides second.
+- For trap, rap, 808-heavy, premium, or release-ready requests, read `auralmind://premium-trap-workflow` or use `premium_trap_mastering_session` before selecting settings.
 - Treat mastering as a checkpointed loop: discover, diagnose, plan, execute, evaluate, intervene, finalize.
+
+## Job lifecycle
+
+- `run_master_job` queues async work and returns a `job_*` handle immediately.
+- `job_status` is the non-blocking polling surface for progress and failure details.
+- `job_result` is the final retrieval surface once status is `done`.
+- `cancel_job` is the safe exit for queued or running jobs.
+- `cancelled` is a terminal job state; a cancelled render should be treated as finished, not retried automatically.
+
+## Metric glossary
+
+- `integrated_lufs`: loudness target alignment.
+- `true_peak_dbtp`: clipping risk and limiter headroom.
+- `crest_db`: punch versus density balance.
+- `stereo_correlation`: mono compatibility and width safety.
+- `centroid_hz`: brightness proxy that helps decide harshness protection and air motion.
 
 ## Workflow Selector
 
@@ -22,7 +39,8 @@ This is the Tool Decision Matrix for common mastering situations.
 |---|---|---|---|
 | New session or unknown server state | `bootstrap`, `get_connect_packet`, `list_session_state`, `auralmind://connect-kit`, `auralmind://contracts` | Discover live capabilities and current session state before building payloads | Diagnose |
 | New song plus a vague goal | `register_audio_from_path` or upload flow, `analyze_audio`, `plan_mastering_strategy` | Turn measured audio plus qualitative intent into executable settings | Execute |
-| Exact settings already known | `register_audio_from_path` or upload flow, `propose_master_settings`, `run_master_job` or `master_audio` | Validate explicit settings before rendering | Evaluate |
+| Premium trap or rap master | `auralmind://premium-trap-workflow`, `premium_trap_mastering_session`, `plan_mastering_strategy`, `run_master_job` | Apply trap-specific preset, low-end, movement, vocal clarity, and QC guidance | Evaluate |
+| Exact settings already known | `register_audio_from_path` or upload flow, `propose_master_settings`, `run_master_job` or `master_audio` | Validate explicit settings before rendering; `master_audio` stays legacy-only | Evaluate |
 | User wants automation | `register_audio_from_path` or upload flow, `master_closed_loop` | Let the server plan, render, score, and optionally retune | Evaluate or Finalize |
 | Unsure between two directions | `semantic_a_b_mastering` | Render two candidate directions instead of guessing | Evaluate |
 | The current pass is close but needs final feel tweaks | `start_interactive_mastering`, `commit_interactive_mastering` | Refine a nearly-finished pass with one focused second stage | Evaluate or Finalize |
@@ -40,7 +58,7 @@ This is the default path for a new song, not the only valid path:
 4. Call `analyze_audio`.
 5. Call `plan_mastering_strategy`.
 6. Optionally call `propose_master_settings`.
-7. Execute with `run_master_job`, `master_audio`, or `master_closed_loop`.
+7. Execute with `run_master_job`, `master_closed_loop`, or `master_audio` only when a blocking legacy render is acceptable.
 8. Evaluate with `job_result`, `analyze_audio`, `compare_audio_metrics`, and `read_artifact`.
 9. If the pass is close but not done, choose one intervention branch and then re-analyze.
 
