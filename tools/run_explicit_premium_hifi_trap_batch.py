@@ -67,6 +67,16 @@ DEFAULT_CONTROL_PROFILE = {
     "movement_amount": 0.26,
     "low_end_focus": 0.72,
 }
+REQ_WRAPPED_TOOLS = {
+    "register_audio_from_path",
+    "analyze_audio",
+    "plan_mastering_strategy",
+    "propose_master_settings",
+    "run_master_job",
+    "job_status",
+    "job_result",
+    "premium_phase_align",
+}
 
 
 @dataclass
@@ -136,7 +146,8 @@ def safe_slug(value: str) -> str:
 
 
 async def mcp_call(client: Client, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-    result = await client.call_tool(name, arguments)
+    payload = {"req": arguments} if name in REQ_WRAPPED_TOOLS else arguments
+    result = await client.call_tool(name, payload)
     if getattr(result, "is_error", False):
         raise RuntimeError(f"mcp_tool_error:{name}: {result}")
     structured = getattr(result, "structured_content", None)
