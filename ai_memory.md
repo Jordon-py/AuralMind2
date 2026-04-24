@@ -243,3 +243,8 @@
 - [2026-04-03] priority 4: if rerun manifests are created, store them under `Ignorance Is Bliss/_manifests/` with a narrow qa-failed-only scope
 - [2026-04-08] priority 1: do a listening pass on the 4 Desktop masters and decide if any version should be brighter, darker, wider, or more aggressive.
 - [2026-04-08] priority 2: if Christopher wants this exact premium-delivery flow reusable, add a `--final-loudnorm` option to `tools/render_new_project_premium_masters.py` instead of relying on a one-off finish pass.
+
+## 2026-04-24 MCP-Only Phase-Aligned Trap Batch
+- completed: Rendered the explicit 10-song premium hi-fi trap queue through AuralMind2 MCP only, including server-side `premium_phase_align` for every final master.
+- output: `masters/mcp_premium_hifi_trap_explicit_current/final` contains 10 phase-aligned WAV exports; `manifest.json` reports `done=10 error=0`.
+- repo state: pushed through commit `81dd067 fix: use valid premium trap prompt intensity`; full test suite passed with `23 passed` and Git was clean afterward.
