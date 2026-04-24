@@ -171,7 +171,10 @@ async def read_mcp_resource_text(client: Client, uri: str) -> str:
 
 
 async def read_mcp_prompt_text(client: Client, name: str, arguments: Dict[str, Any]) -> str:
-    result = await client.get_prompt(name, arguments)
+    try:
+        result = await client.get_prompt(name, arguments)
+    except Exception as exc:
+        return f"prompt_unavailable:{name}: {exc}"
     messages = getattr(result, "messages", None) or []
     parts: List[str] = []
     for message in messages:

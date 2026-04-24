@@ -3468,7 +3468,7 @@ async def on_connect_prompt() -> list[Message]:
 async def premium_trap_mastering_session_prompt(
     file_uri: str,
     goal: str = "premium, industry-standard trap master with tight 808s, clear vocals, controlled width, and release-ready impact",
-    platform: Platform = "spotify",
+    platform: str = "spotify",
     intensity: Literal["clean", "balanced", "aggressive"] = "balanced",
 ) -> str:
     """Premium trap/rap operating prompt for clients that support MCP prompts."""
@@ -3488,8 +3488,9 @@ async def premium_trap_mastering_session_prompt(
         "4. Use `plan_mastering_strategy` unless all settings are already explicit; validate composed settings with `propose_master_settings`.\n"
         "5. Prefer `competitive_trap` or `radio_loud` for trap impact, with `hi_fi_streaming` as the clean fallback when the source is brittle.\n"
         "6. Execute long renders with `run_master_job`; poll `job_status` and fetch `job_result`.\n"
-        "7. Evaluate loudness, true peak, crest, stereo correlation, vocal clarity, low-end mono discipline, and high-end harshness before finalizing.\n"
-        "8. Use only one targeted intervention at a time: `semantic_a_b_mastering`, `start_interactive_mastering`, `analyze_and_optimize_governor`, or `ai_stem_remix`.\n"
+        "7. Run `premium_phase_align` on the chosen trap/rap master artifact before export.\n"
+        "8. Evaluate loudness, true peak, crest, stereo correlation, vocal clarity, low-end mono discipline, and high-end harshness before finalizing.\n"
+        "9. Use only one targeted intervention at a time: `semantic_a_b_mastering`, `start_interactive_mastering`, `analyze_and_optimize_governor`, or `ai_stem_remix`.\n"
         "Do not invent handles, hidden DSP controls, or unstated filesystem paths."
     )
 
