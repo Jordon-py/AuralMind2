@@ -1,0 +1,12 @@
+.wav
+.pycache
+.venv
+.env
+.env.example
+/data
+/mastering
+.mcp_sessions
+/Ignorance Is Bliss
+/server_startup.log
+/tests
+/masters

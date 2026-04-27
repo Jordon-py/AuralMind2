@@ -1,13 +1,11 @@
 {
   "$schema": "https://gofastmcp.com/public/schemas/fastmcp.json/v1.json",
+  "name": "AuralMind2",
   "source": {
     "path": "server.py",
     "entrypoint": "mcp"
   },
   "deployment": {
-    "transport": "streamable-http",
-    "host": "0.0.0.0",
-    "port": 8080,
-    "path": "/mcp"
+    "transport": "stdio"
   }
 }

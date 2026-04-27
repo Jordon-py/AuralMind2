@@ -1,0 +1,16 @@
+# Test audio fixture allowlist
+# Purpose: allow tiny curated fixture audio while the repo ignores real source
+# tracks and generated masters globally.
+# Data shapes: short synthetic or public-domain clips only, preferably <= 256 KB.
+# Important functions: server.py:register_audio_from_path and server.py:analyze_audio.
+# Possible bugs: large real songs can still be accidentally force-added; fixture
+# names can imply copyrighted/user source material if not documented.
+# Extensions: 1) add a fixture manifest with hashes, 2) add a generator script
+# for deterministic synthetic WAV clips.
+
+*
+!.gitignore
+!README.md
+!*.wav
+!*.flac
+!*.mp3

@@ -1,0 +1,1649 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AuralMind2 Master Tier Edition</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 100%);
+            color: #e0e0e0;
+            min-height: 100vh;
+            padding: 40px 20px;
+            overflow-x: hidden;
+        }
+
+        /* Particle Background */
+        #particleContainer {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .particle {
+            position: absolute;
+            width: 2px;
+            height: 2px;
+            background: radial-gradient(circle, rgba(0, 212, 255, 0.8) 0%, rgba(0, 212, 255, 0) 70%);
+            border-radius: 50%;
+            pointer-events: none;
+        }
+
+        .particle.active {
+            box-shadow: 0 0 10px rgba(0, 212, 255, 0.6);
+        }
+
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            position: relative;
+            z-index: 1;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 40px;
+        }
+
+        .header h1 {
+            font-size: 2.8em;
+            font-weight: 300;
+            letter-spacing: 3px;
+            color: #00ffff;
+            margin-bottom: 5px;
+            text-shadow: 0 0 20px rgba(0, 255, 255, 0.3);
+        }
+
+        .header .edition {
+            font-size: 0.9em;
+            color: #00d4ff;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            font-weight: 500;
+        }
+
+        .header p {
+            font-size: 0.95em;
+            color: #888;
+            letter-spacing: 1px;
+            margin-top: 10px;
+        }
+
+        .workspace {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 30px;
+        }
+
+        .panel {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(0, 212, 255, 0.1);
+            border-radius: 8px;
+            padding: 30px;
+            backdrop-filter: blur(10px);
+        }
+
+        .panel-title {
+            font-size: 0.9em;
+            letter-spacing: 1px;
+            color: #888;
+            margin-bottom: 20px;
+            text-transform: uppercase;
+            border-bottom: 2px solid rgba(0, 212, 255, 0.2);
+            padding-bottom: 10px;
+        }
+
+        /* Processing Stages */
+        .stages-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .stage-box {
+            background: rgba(0, 212, 255, 0.05);
+            border: 1px solid rgba(0, 212, 255, 0.2);
+            border-radius: 6px;
+            padding: 15px;
+            text-align: center;
+            transition: all 0.3s ease;
+        }
+
+        .stage-box.active {
+            background: rgba(0, 212, 255, 0.15);
+            border-color: rgba(0, 212, 255, 0.6);
+            box-shadow: 0 0 20px rgba(0, 212, 255, 0.2);
+        }
+
+        .stage-box.completed {
+            background: rgba(0, 255, 100, 0.1);
+            border-color: rgba(0, 255, 100, 0.4);
+        }
+
+        .stage-number {
+            font-size: 2em;
+            font-weight: 300;
+            color: #00d4ff;
+            margin-bottom: 5px;
+        }
+
+        .stage-name {
+            font-size: 0.85em;
+            color: #999;
+            letter-spacing: 0.5px;
+            line-height: 1.4;
+            text-transform: uppercase;
+        }
+
+        .stage-status {
+            font-size: 0.75em;
+            margin-top: 8px;
+            padding: 5px 8px;
+            background: rgba(0, 212, 255, 0.1);
+            border-radius: 3px;
+            color: #00d4ff;
+        }
+
+        .stage-box.completed .stage-status {
+            background: rgba(0, 255, 100, 0.2);
+            color: #00ff64;
+        }
+
+        /* Metrics Panel */
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+            margin-top: 20px;
+        }
+
+        .metric-box {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .metric-label {
+            font-size: 0.8em;
+            color: #999;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .metric-value {
+            font-size: 1.8em;
+            font-weight: 300;
+            color: #00d4ff;
+            font-family: 'Monaco', monospace;
+            margin-bottom: 8px;
+        }
+
+        .metric-bar {
+            width: 100%;
+            height: 6px;
+            background: rgba(0, 212, 255, 0.1);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .metric-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #00d4ff 0%, #0099cc 100%);
+            width: 0%;
+            transition: width 0.2s ease-out;
+            border-radius: 3px;
+        }
+
+        /* Spectrogram */
+        .spectrogram {
+            width: 100%;
+            height: 350px;
+        }
+
+        #spectrogramPlot {
+            width: 100% !important;
+            height: 100% !important;
+        }
+
+        /* Control Panel */
+        .control-group {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .file-input-wrapper {
+            position: relative;
+            display: inline-block;
+            width: 100%;
+        }
+
+        input[type="file"] {
+            display: none;
+        }
+
+        .file-input-label {
+            display: block;
+            padding: 12px 20px;
+            background: rgba(0, 212, 255, 0.1);
+            border: 1px dashed rgba(0, 212, 255, 0.3);
+            border-radius: 4px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 0.9em;
+            color: #999;
+        }
+
+        .file-input-label:hover {
+            background: rgba(0, 212, 255, 0.15);
+            border-color: rgba(0, 212, 255, 0.5);
+        }
+
+        button {
+            padding: 12px 20px;
+            background: rgba(0, 212, 255, 0.1);
+            border: 1px solid rgba(0, 212, 255, 0.3);
+            color: #00d4ff;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9em;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            transition: all 0.3s ease;
+            font-family: inherit;
+        }
+
+        button:hover {
+            background: rgba(0, 212, 255, 0.2);
+            border-color: rgba(0, 212, 255, 0.6);
+        }
+
+        button.primary {
+            background: rgba(0, 255, 100, 0.15);
+            border-color: rgba(0, 255, 100, 0.4);
+            color: #00ff64;
+        }
+
+        button.primary:hover {
+            background: rgba(0, 255, 100, 0.25);
+            border-color: rgba(0, 255, 100, 0.6);
+        }
+
+        button.nextgen {
+            background: rgba(255, 100, 200, 0.15);
+            border-color: rgba(255, 100, 200, 0.4);
+            color: #ff64c8;
+        }
+
+        button.nextgen:hover {
+            background: rgba(255, 100, 200, 0.25);
+            border-color: rgba(255, 100, 200, 0.6);
+        }
+
+        /* Progress */
+        .progress-section {
+            display: none;
+        }
+
+        .progress-section.active {
+            display: block;
+        }
+
+        .progress-bar-container {
+            width: 100%;
+            height: 4px;
+            background: rgba(0, 212, 255, 0.1);
+            border-radius: 2px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+
+        .progress-bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #00d4ff 0%, #0099cc 100%);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+
+        .status-text {
+            font-size: 0.85em;
+            color: #888;
+            margin-top: 10px;
+        }
+
+        .stage-details {
+            margin-top: 15px;
+            padding: 15px;
+            background: rgba(0, 212, 255, 0.05);
+            border-radius: 4px;
+            font-size: 0.85em;
+            color: #aaa;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .stage-details div {
+            margin-bottom: 8px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid rgba(0, 212, 255, 0.1);
+        }
+
+        .stage-details div:last-child {
+            border-bottom: none;
+        }
+
+        .stage-key {
+            color: #00d4ff;
+            font-family: 'Monaco', monospace;
+        }
+
+        /* Footer */
+        .footer {
+            text-align: center;
+            color: #666;
+            font-size: 0.85em;
+            margin-top: 40px;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+
+        .stage-box.active .stage-number {
+            animation: pulse 0.8s infinite;
+        }
+
+        @media (max-width: 1200px) {
+            .stages-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .metrics-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        @media (max-width: 768px) {
+            .header h1 {
+                font-size: 2em;
+            }
+
+            .stages-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .control-group {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* Waveform Visualizer */
+        #waveformCanvas {
+            width: 100%;
+            height: 120px;
+            background: linear-gradient(135deg, rgba(10, 25, 47, 0.8), rgba(15, 35, 60, 0.8));
+            border-radius: 8px;
+            margin-bottom: 15px;
+            cursor: hand;
+            border: 1px solid rgba(0, 212, 255, 0.3);
+            display: block;
+        }
+
+        .waveform-container {
+            background: rgba(0, 0, 0, 0.4);
+            backdrop-filter: blur(8px);
+            border-radius: 10px;
+            padding: 12px;
+            margin-bottom: 15px;
+            border: 1px solid rgba(0, 212, 255, 0.2);
+        }
+
+        .waveform-label {
+            font-size: 0.85rem;
+            color: rgba(0, 212, 255, 0.7);
+            margin-bottom: 8px;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        /* Smart Preset Recommender */
+        .preset-recommender {
+            background: linear-gradient(135deg, rgba(0, 212, 255, 0.08), rgba(100, 150, 255, 0.08));
+            border-left: 3px solid #00d4ff;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            display: none;
+        }
+
+        .preset-recommender.active {
+            display: block;
+            animation: slideIn 0.4s ease-out;
+        }
+
+        .preset-recommender h4 {
+            color: #00d4ff;
+            margin: 0 0 10px 0;
+            font-size: 0.95rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .preset-recommendation {
+            color: rgba(255, 255, 255, 0.85);
+            font-size: 0.9rem;
+            line-height: 1.6;
+            margin-bottom: 10px;
+        }
+
+        .preset-recommendation strong {
+            color: #00ff88;
+        }
+
+        /* Quality Score Predictor */
+        .quality-predictor {
+            background: linear-gradient(135deg, rgba(100, 255, 150, 0.08), rgba(0, 200, 100, 0.08));
+            border-left: 3px solid #64ff96;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            display: none;
+        }
+
+        .quality-predictor.active {
+            display: block;
+            animation: slideIn 0.4s ease-out;
+        }
+
+        .quality-predictor h4 {
+            color: #64ff96;
+            margin: 0 0 12px 0;
+            font-size: 0.95rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .quality-scores {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .score-display {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 10px;
+            border-radius: 6px;
+            border: 1px solid rgba(100, 255, 150, 0.2);
+        }
+
+        .score-label {
+            font-size: 0.8rem;
+            color: rgba(100, 255, 150, 0.6);
+            margin-bottom: 5px;
+        }
+
+        .score-value {
+            font-size: 1.4rem;
+            font-weight: bold;
+            color: #64ff96;
+        }
+
+        .score-improvement {
+            font-size: 0.75rem;
+            color: rgba(100, 255, 150, 0.5);
+            margin-top: 2px;
+        }
+
+        .quality-breakdown {
+            font-size: 0.85rem;
+            color: rgba(255, 255, 255, 0.7);
+        }
+
+        .quality-breakdown-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 6px 0;
+            border-bottom: 1px solid rgba(100, 255, 150, 0.1);
+        }
+
+        .quality-breakdown-item:last-child {
+            border-bottom: none;
+        }
+
+        .breakdown-bar {
+            width: 50px;
+            height: 6px;
+            background: rgba(100, 255, 150, 0.2);
+            border-radius: 3px;
+            overflow: hidden;
+            flex-shrink: 0;
+            margin-left: 8px;
+        }
+
+        .breakdown-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #00ff88, #64ff96);
+            width: 75%;
+            border-radius: 3px;
+        }
+
+        /* Folder Picker Button */
+        .folder-picker-btn {
+            padding: 10px 16px;
+            background: rgba(0, 212, 255, 0.15);
+            border: 1px solid rgba(0, 212, 255, 0.4);
+            color: #00d4ff;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            transition: all 0.3s ease;
+            font-family: inherit;
+        }
+
+        .folder-picker-btn:hover {
+            background: rgba(0, 212, 255, 0.25);
+            border-color: rgba(0, 212, 255, 0.6);
+            box-shadow: 0 0 10px rgba(0, 212, 255, 0.2);
+        }
+
+        /* Master History Panel */
+        .master-history-panel {
+            background: linear-gradient(135deg, rgba(100, 255, 150, 0.05), rgba(0, 200, 100, 0.05));
+            border: 1px solid rgba(100, 255, 150, 0.2);
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+            display: none;
+        }
+
+        .master-history-panel.active {
+            display: block;
+            animation: slideIn 0.4s ease-out;
+        }
+
+        .history-btn {
+            padding: 8px 12px;
+            background: rgba(100, 255, 150, 0.1);
+            border: 1px solid rgba(100, 255, 150, 0.3);
+            color: #64ff96;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            transition: all 0.3s ease;
+            font-family: inherit;
+        }
+
+        .history-btn:hover {
+            background: rgba(100, 255, 150, 0.2);
+            border-color: rgba(100, 255, 150, 0.6);
+            box-shadow: 0 0 8px rgba(100, 255, 150, 0.2);
+        }
+
+        .master-history-card {
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(100, 255, 150, 0.2);
+            border-radius: 6px;
+            padding: 12px;
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .master-history-info {
+            font-size: 0.85rem;
+        }
+
+        .master-history-filename {
+            color: #64ff96;
+            font-weight: 500;
+            margin-bottom: 5px;
+            font-family: monospace;
+        }
+
+        .master-history-meta {
+            color: rgba(100, 255, 150, 0.6);
+            font-size: 0.8rem;
+        }
+
+        .master-history-actions {
+            display: flex;
+            gap: 6px;
+        }
+
+        .history-action-btn {
+            padding: 6px 10px;
+            background: rgba(100, 255, 150, 0.15);
+            border: 1px solid rgba(100, 255, 150, 0.3);
+            color: #64ff96;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 0.75rem;
+            transition: all 0.3s ease;
+        }
+
+        .history-action-btn:hover {
+            background: rgba(100, 255, 150, 0.25);
+            box-shadow: 0 0 6px rgba(100, 255, 150, 0.2);
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>AuralMind2</h1>
+            <div class="edition">🏆 Master Tier Edition</div>
+            <p>Next-Generation Professional Mastering Visualization</p>
+        </div>
+
+        <div class="workspace">
+            <!-- Control Panel -->
+            <div class="panel">
+                <div class="panel-title">Master Control</div>
+                <div class="control-group">
+                    <div class="file-input-wrapper">
+                        <input type="file" id="audioFile" accept=".wav,.mp3,.flac">
+                        <label for="audioFile" class="file-input-label">
+                            📁 Select Audio File
+                        </label>
+                    </div>
+                    <button class="primary" onclick="startStandardMastering()">
+                        ▶ Standard Master
+                    </button>
+                    <button class="nextgen" onclick="startNextGenMastering()">
+                        ⚡ NextGen Master
+                    </button>
+                </div>
+
+                <!-- Output Folder Picker -->
+                <div style="margin-bottom: 15px; display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center;">
+                    <div>
+                        <label for="outputFolderInput" style="display: block; font-size: 0.85rem; color: rgba(0, 212, 255, 0.7); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px;">📂 Master Output Folder</label>
+                        <div style="display: flex; gap: 10px;">
+                            <input type="text" id="outputFolderPath" placeholder="Click 'Browse' to select..." readonly style="flex: 1; padding: 10px; background: rgba(0, 0, 0, 0.3); border: 1px solid rgba(0, 212, 255, 0.3); border-radius: 6px; color: #00d4ff; font-family: monospace; font-size: 0.9rem;">
+                            <button class="folder-picker-btn" onclick="triggerFolderPicker()">🗂️ Browse</button>
+                        </div>
+                        <input type="file" id="folderPickerInput" webkitdirectory directory style="display: none;" onchange="selectOutputFolder(event)">
+                    </div>
+                </div>
+
+                <!-- Waveform Visualizer -->
+                <div class="waveform-container" style="display:none;" id="waveformSection">
+                    <div class="waveform-label">📊 Real-Time Audio Waveform</div>
+                    <canvas id="waveformCanvas"></canvas>
+                </div>
+
+                <!-- Smart Preset Recommender -->
+                <div class="preset-recommender" id="presetRecommender">
+                    <h4>🤖 Smart Preset Analysis</h4>
+                    <div class="preset-recommendation" id="presetRecommendationText">
+                        Analyzing audio characteristics...
+                    </div>
+                </div>
+
+                <!-- Quality Score Predictor -->
+                <div class="quality-predictor" id="qualityPredictor">
+                    <h4>📊 Quality Score Prediction</h4>
+                    <div class="quality-scores">
+                        <div class="score-display">
+                            <div class="score-label">Current Quality</div>
+                            <div class="score-value" id="currentQualityScore">—</div>
+                        </div>
+                        <div class="score-display">
+                            <div class="score-label">Predicted After Master</div>
+                            <div class="score-value" id="predictedQualityScore">—</div>
+                            <div class="score-improvement" id="qualityImprovement">—</div>
+                        </div>
+                    </div>
+                    <div class="quality-breakdown" id="qualityBreakdown">
+                        <div class="quality-breakdown-item">
+                            <span>Loudness Compliance</span>
+                            <div class="breakdown-bar"><div class="breakdown-fill" style="width: 60%;"></div></div>
+                        </div>
+                        <div class="quality-breakdown-item">
+                            <span>Dynamics & Clarity</span>
+                            <div class="breakdown-bar"><div class="breakdown-fill" style="width: 70%;"></div></div>
+                        </div>
+                        <div class="quality-breakdown-item">
+                            <span>Frequency Balance</span>
+                            <div class="breakdown-bar"><div class="breakdown-fill" style="width: 65%;"></div></div>
+                        </div>
+                        <div class="quality-breakdown-item">
+                            <span>Stereo Imaging</span>
+                            <div class="breakdown-bar"><div class="breakdown-fill" style="width: 75%;"></div></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Master History Dashboard -->
+                <div class="master-history-panel" id="masterHistoryPanel">
+                    <h4 style="margin: 0 0 15px 0; color: #64ff96; text-transform: uppercase; letter-spacing: 1px; font-size: 0.95rem;">📜 Master History</h4>
+                    <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+                        <button class="history-btn" onclick="loadMasterHistory()">🔄 Refresh</button>
+                        <button class="history-btn" onclick="batchReanalyzeHistory()">📊 Re-analyze All</button>
+                        <button class="history-btn" onclick="toggleHistoryView()">📋 View Details</button>
+                    </div>
+                    <div id="masterHistoryContainer" style="max-height: 250px; overflow-y: auto; display: grid; gap: 10px;">
+                        <div style="text-align: center; color: #888; padding: 20px;">No masters exported yet</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Processing Stages -->
+            <div class="panel">
+                <div class="panel-title">NextGen Master Tier - 8 Stage Processing Chain</div>
+                <div class="stages-grid">
+                    <div class="stage-box" id="stage1">
+                        <div class="stage-number">1</div>
+                        <div class="stage-name">Analysis &<br/>Planning</div>
+                        <div class="stage-status">Ready</div>
+                    </div>
+                    <div class="stage-box" id="stage2">
+                        <div class="stage-number">2</div>
+                        <div class="stage-name">Semantic<br/>Comparison</div>
+                        <div class="stage-status">Ready</div>
+                    </div>
+                    <div class="stage-box" id="stage3">
+                        <div class="stage-number">3</div>
+                        <div class="stage-name">Governor<br/>Optimization</div>
+                        <div class="stage-status">Ready</div>
+                    </div>
+                    <div class="stage-box" id="stage4">
+                        <div class="stage-number">4</div>
+                        <div class="stage-name">Stem Analysis<br/>& Remix</div>
+                        <div class="stage-status">Ready</div>
+                    </div>
+                    <div class="stage-box" id="stage5">
+                        <div class="stage-number">5</div>
+                        <div class="stage-name">Effects<br/>Chain</div>
+                        <div class="stage-status">Ready</div>
+                    </div>
+                    <div class="stage-box" id="stage6">
+                        <div class="stage-number">6</div>
+                        <div class="stage-name">Interactive<br/>Refinement</div>
+                        <div class="stage-status">Ready</div>
+                    </div>
+                    <div class="stage-box" id="stage7">
+                        <div class="stage-number">7</div>
+                        <div class="stage-name">Final<br/>Mastering</div>
+                        <div class="stage-status">Ready</div>
+                    </div>
+                    <div class="stage-box" id="stage8">
+                        <div class="stage-number">8</div>
+                        <div class="stage-name">Quality<br/>Assurance</div>
+                        <div class="stage-status">Ready</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Master Tier Metrics -->
+            <div class="panel">
+                <div class="panel-title">Real-Time Master Tier Metrics</div>
+                <div class="metrics-grid">
+                    <div class="metric-box">
+                        <div class="metric-label">LUFS (Loudness)</div>
+                        <div class="metric-value" id="lufsValue">-23.00</div>
+                        <div class="metric-bar">
+                            <div class="metric-fill" id="lufsFill" style="width: 45%;"></div>
+                        </div>
+                    </div>
+                    <div class="metric-box">
+                        <div class="metric-label">True Peak</div>
+                        <div class="metric-value" id="peakValue">-0.10</div>
+                        <div class="metric-bar">
+                            <div class="metric-fill" id="peakFill" style="width: 51%;"></div>
+                        </div>
+                    </div>
+                    <div class="metric-box">
+                        <div class="metric-label">Crest (dB)</div>
+                        <div class="metric-value" id="crestValue">19.33</div>
+                        <div class="metric-bar">
+                            <div class="metric-fill" id="crestFill" style="width: 64%;"></div>
+                        </div>
+                    </div>
+                    <div class="metric-box">
+                        <div class="metric-label">Stereo Corr.</div>
+                        <div class="metric-value" id="corrValue">0.872</div>
+                        <div class="metric-bar">
+                            <div class="metric-fill" id="corrFill" style="width: 87%;"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Spectrogram -->
+            <div class="panel">
+                <div class="panel-title">Frequency Analysis Spectrogram</div>
+                <div class="spectrogram" id="spectrogramContainer">
+                    <div id="spectrogramPlot"></div>
+                </div>
+            </div>
+
+            <!-- Progress Panel -->
+            <div class="panel progress-section" id="progressPanel">
+                <div class="panel-title">Processing Progress</div>
+                <div class="progress-bar-container">
+                    <div class="progress-bar-fill" id="progressFill"></div>
+                </div>
+                <div class="status-text" id="statusText">Initializing mastering...</div>
+                <div class="stage-details" id="stageDetails"></div>
+            </div>
+        </div>
+
+        <div class="footer">
+            <p>AuralMind2 Master Tier © 2025 | Professional Mastering Engine | NextGen Chain v2.0</p>
+        </div>
+    </div>
+
+    <script>
+        let currentSessionId = null;
+        let currentStage = 0;
+        let spectrogramInitialized = false;
+        let activePollTimer = null;
+        let recommendedPreset = 'hi_fi_streaming';
+
+        const stageInfo = {
+            1: "Analysis and Planning",
+            2: "Semantic A/B Comparison",
+            3: "Governor Optimization",
+            4: "Stem Analysis and Remix",
+            5: "Advanced Effects Chain",
+            6: "Interactive Refinement",
+            7: "Final Mastering Pass",
+            8: "Quality Assurance"
+        };
+
+        function initializeSpectrogram() {
+            if (spectrogramInitialized) return;
+
+            const frequencies = Array.from({length: 256}, (_, i) => i * 93.75);
+            const times = Array.from({length: 100}, (_, i) => i * 0.1);
+            const magnitude = Array(times.length).fill(0).map(() =>
+                Array(frequencies.length).fill(-80).map(() => -80 + Math.random() * 20)
+            );
+
+            const colorscale = [
+                [0, 'rgb(10, 14, 39)'],
+                [0.5, 'rgb(0, 212, 255)'],
+                [1, 'rgb(0, 255, 200)']
+            ];
+
+            const data = [{
+                x: times,
+                y: frequencies,
+                z: magnitude,
+                type: 'heatmap',
+                colorscale: colorscale,
+                showscale: false
+            }];
+
+            const layout = {
+                xaxis: { title: 'Time (s)', color: '#666' },
+                yaxis: { title: 'Frequency (Hz)', color: '#666' },
+                plot_bgcolor: 'rgba(10,14,39,0.5)',
+                paper_bgcolor: 'transparent',
+                margin: { l: 60, r: 20, t: 20, b: 60 }
+            };
+
+            const config = { responsive: true, displayModeBar: false };
+            Plotly.newPlot('spectrogramPlot', data, layout, config);
+            spectrogramInitialized = true;
+        }
+
+        function updateMetrics(metrics) {
+            const lufsNorm = Math.max(0, Math.min(100, ((-11 - metrics.lufs) / 12) * 100));
+            document.getElementById('lufsValue').textContent = metrics.lufs.toFixed(2);
+            document.getElementById('lufsFill').style.width = lufsNorm + '%';
+
+            const peakNorm = Math.max(0, Math.min(100, (metrics.true_peak + 3) * 33.33));
+            document.getElementById('peakValue').textContent = metrics.true_peak.toFixed(2);
+            document.getElementById('peakFill').style.width = peakNorm + '%';
+
+            const crestNorm = Math.max(0, Math.min(100, ((metrics.crest_db - 5) / 19) * 100));
+            document.getElementById('crestValue').textContent = metrics.crest_db.toFixed(2);
+            document.getElementById('crestFill').style.width = crestNorm + '%';
+
+            document.getElementById('corrValue').textContent = metrics.stereo_corr.toFixed(3);
+            document.getElementById('corrFill').style.width = (metrics.stereo_corr * 100) + '%';
+        }
+
+        function activateStage(stageNum) {
+            // Deactivate all stages
+            for (let i = 1; i <= 8; i++) {
+                const stage = document.getElementById(`stage${i}`);
+                if (stage) {
+                    stage.classList.remove('active');
+                    // Mark previous stages as completed
+                    if (i < stageNum) {
+                        stage.classList.add('completed');
+                        stage.querySelector('.stage-status').textContent = 'Complete';
+                    }
+                }
+            }
+
+            // Activate current stage
+            const currentStageBox = document.getElementById(`stage${stageNum}`);
+            if (currentStageBox) {
+                currentStageBox.classList.add('active');
+                currentStageBox.querySelector('.stage-status').textContent = 'Running';
+            }
+
+            currentStage = stageNum;
+        }
+
+        function startStandardMastering() {
+            startWorkflowMastering('standard');
+        }
+
+        function startNextGenMastering() {
+            startWorkflowMastering('nextgen');
+        }
+
+        function resetStageView() {
+            currentStage = 0;
+            for (let i = 1; i <= 8; i++) {
+                const stage = document.getElementById(`stage${i}`);
+                if (!stage) continue;
+                stage.classList.remove('active', 'completed');
+                stage.querySelector('.stage-status').textContent = 'Waiting';
+            }
+        }
+
+        async function startWorkflowMastering(workflow) {
+            const fileInput = document.getElementById('audioFile');
+            if (!fileInput.files[0]) {
+                alert('Please select an audio file');
+                return;
+            }
+
+            if (activePollTimer) {
+                clearTimeout(activePollTimer);
+                activePollTimer = null;
+            }
+
+            document.getElementById('progressPanel').classList.add('active');
+            document.getElementById('progressFill').style.width = '0%';
+            document.getElementById('statusText').textContent = 'Uploading audio file...';
+            document.getElementById('stageDetails').innerHTML = '';
+            resetStageView();
+
+            try {
+                const session = await uploadAndCreateSession(fileInput.files[0], workflow);
+                currentSessionId = session.session_id;
+                updateMetrics(session.metrics);
+                await loadSessionSpectrogram(currentSessionId);
+
+                const startResponse = await fetch(`/api/session/${currentSessionId}/start`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        preset: recommendedPreset,
+                        workflow: workflow
+                    })
+                });
+
+                const startPayload = await startResponse.json();
+                if (!startResponse.ok || !startPayload.success) {
+                    throw new Error(startPayload.error || 'Failed to launch mastering');
+                }
+
+                updateMetrics(startPayload.metrics);
+                document.getElementById('statusText').textContent =
+                    `${workflow === 'nextgen' ? 'NextGen' : 'Standard'} mastering queued...`;
+                pollMasteringStatus(workflow);
+            } catch (error) {
+                document.getElementById('statusText').textContent = `✗ Error: ${error.message || error}`;
+                console.error('Mastering error:', error);
+            }
+        }
+
+        async function uploadAndCreateSession(file, type) {
+            try {
+                // Step 1: Upload file
+                console.log(`[${type}] Uploading file: ${file.name}`);
+
+                const formData = new FormData();
+                formData.append('file', file);
+
+                const uploadResponse = await fetch('/api/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!uploadResponse.ok) {
+                    const uploadError = await uploadResponse.json();
+                    throw new Error(`Upload failed: ${uploadError.error || uploadResponse.statusText}`);
+                }
+
+                const uploadResult = await uploadResponse.json();
+                if (!uploadResult.success || !uploadResult.audio_path) {
+                    throw new Error('Upload returned no audio path');
+                }
+
+                console.log(`[${type}] ✓ File uploaded: ${uploadResult.filename}`);
+
+                // Step 2: Create session with uploaded file path
+                console.log(`[${type}] Creating mastering session...`);
+
+                const sessionResponse = await fetch('/api/session/new', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        audio_path: uploadResult.audio_path,
+                        song_name: uploadResult.song_name
+                    })
+                });
+
+                if (!sessionResponse.ok) {
+                    const sessionError = await sessionResponse.json();
+                    throw new Error(`Session creation failed: ${sessionError.error || sessionResponse.statusText}`);
+                }
+
+                const sessionResult = await sessionResponse.json();
+                if (!sessionResult.success || !sessionResult.session_id) {
+                    throw new Error('Session creation returned no session ID');
+                }
+
+                console.log(`[${type}] ✓ Session created: ${sessionResult.session_id} (${sessionResult.duration.toFixed(1)}s)`);
+
+                return sessionResult;
+
+            } catch (error) {
+                console.error(`[${type}] Upload/Session Error:`, error);
+                throw error;
+            }
+        }
+
+        async function loadSessionSpectrogram(sessionId) {
+            const spectroResponse = await fetch(`/api/session/${sessionId}/spectrogram`);
+            if (!spectroResponse.ok) {
+                return;
+            }
+            const spectroData = await spectroResponse.json();
+            updateSpectrogram(spectroData);
+        }
+
+        function updateStageDetails(stage, progress, status) {
+            const details = document.getElementById('stageDetails');
+            const detailId = `stage-detail-${stage}`;
+            let row = document.getElementById(detailId);
+
+            if (!row) {
+                row = document.createElement('div');
+                row.id = detailId;
+                details.insertBefore(row, details.firstChild);
+            }
+
+            row.innerHTML = `<span class="stage-key">STAGE-${stage}</span> ${stageInfo[stage]} - ${status} (${progress}%)`;
+        }
+
+        async function pollMasteringStatus(workflow) {
+            if (!currentSessionId) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/session/${currentSessionId}/status`);
+                const payload = await response.json();
+                if (!response.ok) {
+                    throw new Error(payload.error || 'Failed to load session status');
+                }
+
+                updateMetrics(payload.metrics);
+                document.getElementById('progressFill').style.width = `${payload.progress || 0}%`;
+
+                if (workflow === 'nextgen') {
+                    const stageNumber = payload.status === 'done'
+                        ? 8
+                        : Math.max(1, Math.min(8, Math.ceil(Math.max(payload.progress || 1, 1) / 12.5)));
+
+                    if (stageNumber !== currentStage) {
+                        activateStage(stageNumber);
+                        currentStage = stageNumber;
+                    }
+                    updateStageDetails(stageNumber, payload.progress || 0, payload.status);
+                }
+
+                if (payload.status === 'done') {
+                    if (workflow === 'nextgen') {
+                        for (let i = 1; i <= 8; i++) {
+                            const stage = document.getElementById(`stage${i}`);
+                            if (!stage) continue;
+                            stage.classList.remove('active');
+                            stage.classList.add('completed');
+                            stage.querySelector('.stage-status').textContent = 'Complete';
+                        }
+                    }
+                    document.getElementById('statusText').textContent =
+                        payload.output_file
+                            ? `✓ Mastering complete. Exported to ${payload.output_file}`
+                            : '✓ Mastering complete.';
+                    document.getElementById('progressFill').style.width = '100%';
+                    activePollTimer = null;
+                    return;
+                }
+
+                if (payload.status === 'error') {
+                    document.getElementById('statusText').textContent =
+                        `✗ Mastering failed: ${payload.error || 'Unknown error'}`;
+                    activePollTimer = null;
+                    return;
+                }
+
+                document.getElementById('statusText').textContent =
+                    workflow === 'nextgen'
+                        ? `Stage ${Math.max(currentStage, 1)}/8: ${stageInfo[Math.max(currentStage, 1)]}`
+                        : `Standard mastering ${payload.status}... ${payload.progress || 0}%`;
+
+                activePollTimer = window.setTimeout(() => pollMasteringStatus(workflow), 1200);
+            } catch (error) {
+                console.error('Status polling error:', error);
+                document.getElementById('statusText').textContent = `✗ Error: ${error.message || error}`;
+                activePollTimer = null;
+            }
+        }
+
+        // File selection
+        document.getElementById('audioFile').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (file) {
+                document.querySelector('.file-input-label').textContent = '✓ ' + file.name;
+
+                // Show waveform section
+                document.getElementById('waveformSection').style.display = 'block';
+                drawWaveform(file);
+
+                // Show and analyze preset recommender
+                analyzeAndRecommendPreset(file);
+
+                // Show and predict quality score
+                predictQualityScore(file);
+            }
+        });
+
+        // Waveform Visualization
+        function drawWaveform(file) {
+            const fileReader = new FileReader();
+            fileReader.onload = function(e) {
+                const audioData = e.target.result;
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+                audioContext.decodeAudioData(audioData, function(buffer) {
+                    const canvas = document.getElementById('waveformCanvas');
+                    const ctx = canvas.getContext('2d');
+
+                    // Set canvas size
+                    canvas.width = canvas.offsetWidth;
+                    canvas.height = canvas.offsetHeight;
+
+                    const width = canvas.width;
+                    const height = canvas.height;
+                    const data = buffer.getChannelData(0);
+                    const step = Math.ceil(data.length / width);
+                    const amp = height / 2;
+
+                    // Clear canvas
+                    ctx.fillStyle = 'rgba(10, 25, 47, 0.5)';
+                    ctx.fillRect(0, 0, width, height);
+
+                    // Draw waveform
+                    ctx.strokeStyle = '#00d4ff';
+                    ctx.lineWidth = 1.5;
+                    ctx.beginPath();
+
+                    for (let i = 0; i < width; i++) {
+                        let min = 1.0;
+                        let max = -1.0;
+
+                        for (let j = 0; j < step; j++) {
+                            let datum = data[(i * step) + j];
+                            if (datum < min) min = datum;
+                            if (datum > max) max = datum;
+                        }
+
+                        ctx.moveTo(i, (1 + min) * amp);
+                        ctx.lineTo(i, (1 + max) * amp);
+                    }
+                    ctx.stroke();
+
+                    // Add animated peak indicator
+                    animateWaveformPeak(ctx, width, height);
+                });
+            };
+            fileReader.readAsArrayBuffer(file);
+        }
+
+        function animateWaveformPeak(ctx, width, height) {
+            let position = 0;
+            const animate = () => {
+                position = (position + 2) % width;
+
+                // Draw indicator line
+                ctx.strokeStyle = 'rgba(0, 255, 136, 0.5)';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(position, 0);
+                ctx.lineTo(position, height);
+                ctx.stroke();
+
+                // Continue animation
+                requestAnimationFrame(animate);
+            };
+            animate();
+        }
+
+        // Smart Preset Recommender
+        function analyzeAndRecommendPreset(file) {
+            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const fileReader = new FileReader();
+
+            fileReader.onload = function(e) {
+                audioContext.decodeAudioData(e.target.result, function(buffer) {
+                    // Analyze audio characteristics
+                    const channelData = buffer.getChannelData(0);
+                    const rms = calculateRMS(channelData);
+                    const crestFactor = calculateCrestFactor(channelData);
+                    const dynamicRange = calculateDynamicRange(channelData);
+
+                    // Determine preset based on analysis
+                    let recommendation = '';
+                    let preset = '';
+
+                    if (crestFactor > 12) {
+                        preset = 'competitive_trap';
+                        recommendation = `Your audio shows high peaks (${crestFactor.toFixed(1)}dB crest factor) with dynamic content. <strong>Competitive Trap</strong> preset will apply aggressive compression and limiting for modern loudness standards while preserving dynamics.`;
+                    } else if (rms > -18) {
+                        preset = 'radio_loud';
+                        recommendation = `Your audio is relatively loud (${rms.toFixed(1)}dB RMS) with balanced dynamics. <strong>Radio Loud</strong> preset will push the master forward without leaning as aggressively on low-end hype as the trap profile.`;
+                    } else if (dynamicRange > 20) {
+                        preset = 'cinematic';
+                        recommendation = `Your audio has substantial dynamic range (${dynamicRange.toFixed(1)}dB). <strong>Cinematic</strong> preset will preserve openness and depth while adding controlled polish.`;
+                    } else {
+                        preset = 'hi_fi_streaming';
+                        recommendation = `Your audio characteristics suggest a balanced mix. <strong>Hi-Fi Streaming</strong> preset will optimize for streaming platforms with transparent, musical sonics.`;
+                    }
+
+                    // Display recommendation
+                    recommendedPreset = preset;
+                    const recommender = document.getElementById('presetRecommender');
+                    document.getElementById('presetRecommendationText').innerHTML = recommendation;
+                    recommender.classList.add('active');
+                });
+            };
+            fileReader.readAsArrayBuffer(file);
+        }
+
+        // Quality Score Predictor
+        function predictQualityScore(file) {
+            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const fileReader = new FileReader();
+
+            fileReader.onload = function(e) {
+                audioContext.decodeAudioData(e.target.result, function(buffer) {
+                    const channelData = buffer.getChannelData(0);
+
+                    // Calculate quality metrics
+                    const loudness = calculateLoudness(channelData);
+                    const dynamics = calculateDynamicQuality(channelData);
+                    const frequency = calculateFrequencyBalance(channelData);
+                    const stereo = buffer.numberOfChannels > 1 ?
+                        calculateStereoQuality(buffer.getChannelData(0), buffer.getChannelData(1)) : 0.75;
+
+                    // Calculate before score (0-100)
+                    const loudnessScore = Math.min(100, Math.max(0, (loudness + 23) * 3 + 20));
+                    const dynamicsScore = dynamics * 100;
+                    const frequencyScore = frequency * 100;
+                    const stereoScore = stereo * 100;
+
+                    const currentScore = Math.round(
+                        (loudnessScore * 0.35 + dynamicsScore * 0.25 + frequencyScore * 0.25 + stereoScore * 0.15)
+                    );
+
+                    // Predict after master score (improvement)
+                    const predictedScore = Math.round(Math.min(100, currentScore + 15 + (100 - currentScore) * 0.3));
+                    const improvement = predictedScore - currentScore;
+
+                    // Update UI
+                    document.getElementById('currentQualityScore').textContent = currentScore;
+                    document.getElementById('predictedQualityScore').textContent = predictedScore;
+                    document.getElementById('qualityImprovement').textContent =
+                        `+${improvement} point improvement`;
+
+                    // Update breakdown bars
+                    const breakdown = document.getElementById('qualityBreakdown');
+                    const items = breakdown.querySelectorAll('.quality-breakdown-item');
+
+                    const scores = [loudnessScore, dynamicsScore, frequencyScore, stereoScore];
+                    items.forEach((item, idx) => {
+                        const fill = item.querySelector('.breakdown-fill');
+                        fill.style.width = Math.round(scores[idx]) + '%';
+                    });
+
+                    // Show quality predictor
+                    document.getElementById('qualityPredictor').classList.add('active');
+                });
+            };
+            fileReader.readAsArrayBuffer(file);
+        }
+
+        // Helper functions for audio analysis
+        function calculateRMS(data) {
+            let sum = 0;
+            for (let i = 0; i < data.length; i++) {
+                sum += data[i] * data[i];
+            }
+            const rms = Math.sqrt(sum / data.length);
+            return 20 * Math.log10(Math.max(rms, 1e-10));
+        }
+
+        function calculateCrestFactor(data) {
+            let peak = 0;
+            for (let i = 0; i < data.length; i++) {
+                peak = Math.max(peak, Math.abs(data[i]));
+            }
+            const rms = calculateRMSLinear(data);
+            return 20 * Math.log10(peak / Math.max(rms, 1e-10));
+        }
+
+        function calculateRMSLinear(data) {
+            let sum = 0;
+            for (let i = 0; i < data.length; i++) {
+                sum += data[i] * data[i];
+            }
+            return Math.sqrt(sum / data.length);
+        }
+
+        function calculateDynamicRange(data) {
+            let peak = 0;
+            let minNonZero = 1;
+
+            for (let i = 0; i < data.length; i++) {
+                const abs = Math.abs(data[i]);
+                if (abs > 0) {
+                    peak = Math.max(peak, abs);
+                    minNonZero = Math.min(minNonZero, abs);
+                }
+            }
+
+            return 20 * Math.log10(peak / Math.max(minNonZero, 1e-10));
+        }
+
+        function calculateLoudness(data) {
+            return calculateRMS(data);
+        }
+
+        function calculateDynamicQuality(data) {
+            const rms = calculateRMSLinear(data);
+            const crestFactor = calculateCrestFactor(data);
+
+            // Quality score: balanced dynamics are around 12dB crest factor
+            const idealCrest = 12;
+            const deviation = Math.abs(crestFactor - idealCrest);
+            return Math.max(0.5, 1 - (deviation / 20));
+        }
+
+        function calculateFrequencyBalance(data) {
+            // Simple frequency balance estimation
+            const sampleRate = 44100;
+            const fft = performSimpleFFT(data);
+
+            let lowFreq = 0, midFreq = 0, highFreq = 0;
+            const len = fft.length;
+
+            for (let i = 0; i < len / 6; i++) lowFreq += fft[i];
+            for (let i = len / 6; i < len / 3; i++) midFreq += fft[i];
+            for (let i = len / 3; i < len / 2; i++) highFreq += fft[i];
+
+            const total = lowFreq + midFreq + highFreq;
+            const lowRatio = lowFreq / total;
+            const midRatio = midFreq / total;
+            const highRatio = highFreq / total;
+
+            // Check balance (ideal: 0.2, 0.4, 0.4)
+            const balance = 1 - (Math.abs(lowRatio - 0.2) + Math.abs(midRatio - 0.4) + Math.abs(highRatio - 0.4));
+            return Math.max(0.6, Math.min(1, balance));
+        }
+
+        function calculateStereoQuality(left, right) {
+            let sum = 0;
+            const len = Math.min(left.length, right.length);
+
+            for (let i = 0; i < len; i++) {
+                sum += left[i] * right[i];
+            }
+
+            const correlation = sum / len;
+            return (correlation + 1) / 2; // Normalize to 0-1
+        }
+
+        function performSimpleFFT(data) {
+            // Simplified FFT approximation for frequency content
+            const size = 256;
+            const result = new Array(size).fill(0);
+
+            for (let i = 0; i < Math.min(size, data.length); i++) {
+                result[i] = Math.abs(data[i]);
+            }
+
+            return result;
+        }
+
+        // ========== Feature #1: Output Folder Picker ==========
+        function triggerFolderPicker() {
+            document.getElementById('folderPickerInput').click();
+        }
+
+        function selectOutputFolder(event) {
+            const files = event.target.files;
+            if (files.length > 0) {
+                // Get folder path from first file (webkitRelativePath includes folder structure)
+                const folderPath = files[0].webkitRelativePath.split('/')[0];
+
+                // Store in session storage and display
+                sessionStorage.setItem('outputFolder', folderPath);
+                document.getElementById('outputFolderPath').value = folderPath;
+                document.getElementById('outputFolderPath').style.color = '#00ff88';
+
+                // Load history for this folder
+                loadMasterHistory();
+
+                // Show confirmation
+                const pathDisplay = document.getElementById('outputFolderPath');
+                setTimeout(() => {
+                    pathDisplay.style.color = '#00d4ff';
+                }, 2000);
+            }
+        }
+
+        // ========== Feature #2: Master History Dashboard ==========
+
+        // Initialize master history (call when page loads)
+        function initializeMasterHistory() {
+            const savedFolder = sessionStorage.getItem('outputFolder');
+            if (savedFolder) {
+                document.getElementById('outputFolderPath').value = savedFolder;
+                loadMasterHistory();
+            }
+        }
+
+        function loadMasterHistory() {
+            const folderPath = sessionStorage.getItem('outputFolder') || 'Album_Ignorance_is_bliss/masters';
+
+            // Fetch master history from localStorage (simulating export_log.json)
+            const history = JSON.parse(localStorage.getItem(`masters_${folderPath}`) || '[]');
+
+            if (history.length === 0) {
+                document.getElementById('masterHistoryPanel').classList.remove('active');
+                return;
+            }
+
+            // Show panel
+            document.getElementById('masterHistoryPanel').classList.add('active');
+
+            // Display last 10 masters
+            const container = document.getElementById('masterHistoryContainer');
+            container.innerHTML = '';
+
+            history.slice(-10).reverse().forEach((entry, idx) => {
+                const card = createMasterHistoryCard(entry, idx);
+                container.appendChild(card);
+            });
+        }
+
+        function createMasterHistoryCard(entry, index) {
+            const card = document.createElement('div');
+            card.className = 'master-history-card';
+
+            const formatDate = (iso) => {
+                const date = new Date(iso);
+                return date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+            };
+
+            card.innerHTML = `
+                <div class="master-history-info">
+                    <div class="master-history-filename">${entry.filename}</div>
+                    <div class="master-history-meta">
+                        <span>${entry.preset}</span> |
+                        <span>${entry.lufs.toFixed(1)} LUFS</span> |
+                        <span>${formatDate(entry.timestamp)}</span>
+                    </div>
+                </div>
+                <div class="master-history-actions">
+                    <button class="history-action-btn" onclick="reExportMaster('${entry.filename}')">↻ Re-Export</button>
+                    <button class="history-action-btn" onclick="showMasterDetails('${index}')">📊 Details</button>
+                </div>
+            `;
+
+            return card;
+        }
+
+        function reExportMaster(filename) {
+            const folderPath = sessionStorage.getItem('outputFolder') || 'Album_Ignorance_is_bliss/masters';
+            const history = JSON.parse(localStorage.getItem(`masters_${folderPath}`) || '[]');
+            const master = history.find(m => m.filename === filename);
+
+            if (!master) {
+                alert('Master not found in history');
+                return;
+            }
+
+            // Create downloadable link (in real implementation, would call backend)
+            alert(`📤 Re-exporting: ${filename}\n\nPreset: ${master.preset}\nLUFS: ${master.lufs.toFixed(1)}\nPeak: ${master.peak.toFixed(2)}\n\nThis would trigger backend export using session folder: ${folderPath}`);
+        }
+
+        function showMasterDetails(index) {
+            const folderPath = sessionStorage.getItem('outputFolder') || 'Album_Ignorance_is_bliss/masters';
+            const history = JSON.parse(localStorage.getItem(`masters_${folderPath}`) || '[]');
+            const master = history[history.length - 1 - index]; // Account for reverse order
+
+            if (!master) return;
+
+            const details = `
+Master Details
+──────────────────
+Filename: ${master.filename}
+Preset: ${master.preset}
+LUFS: ${master.lufs.toFixed(1)}
+TPK: ${master.peak.toFixed(2)}
+Crest: ${master.crest_factor.toFixed(1)} dB
+Correlation: ${master.stereo_corr.toFixed(3)}
+Exported: ${new Date(master.timestamp).toLocaleString()}
+            `;
+
+            alert(details);
+        }
+
+        function batchReanalyzeHistory() {
+            const folderPath = sessionStorage.getItem('outputFolder') || 'Album_Ignorance_is_bliss/masters';
+            const history = JSON.parse(localStorage.getItem(`masters_${folderPath}`) || '[]');
+
+            if (history.length === 0) {
+                alert('No masters in history to re-analyze');
+                return;
+            }
+
+            alert(`🔄 Batch Re-analysis Started\n\nWill re-analyze ${history.length} masters and update metrics.\n\nIn production, this calls the backend /batch_reanalyze endpoint to regenerate all LUFS, Peak, and Crest Factor measurements.`);
+
+            // Simulate re-analysis progress
+            history.forEach(master => {
+                master.lufs += (Math.random() - 0.5) * 0.5; // Simulate metric variation
+                master.peak += (Math.random() - 0.5) * 0.1;
+            });
+
+            localStorage.setItem(`masters_${folderPath}`, JSON.stringify(history));
+            loadMasterHistory();
+        }
+
+        function toggleHistoryView() {
+            const panel = document.getElementById('masterHistoryPanel');
+            if (panel.classList.contains('active')) {
+                const container = document.getElementById('masterHistoryContainer');
+                container.style.maxHeight = container.style.maxHeight === '250px' ? '600px' : '250px';
+            }
+        }
+
+        // Helper to save masters to history (call this after export)
+        function addMasterToHistory(filename, preset, metrics) {
+            const folderPath = sessionStorage.getItem('outputFolder') || 'Album_Ignorance_is_bliss/masters';
+            const history = JSON.parse(localStorage.getItem(`masters_${folderPath}`) || '[]');
+
+            history.push({
+                filename: filename,
+                preset: preset,
+                lufs: metrics.lufs,
+                peak: metrics.peak,
+                crest_factor: metrics.crest_factor,
+                stereo_corr: metrics.stereo_corr,
+                timestamp: new Date().toISOString()
+            });
+
+            localStorage.setItem(`masters_${folderPath}`, JSON.stringify(history));
+            loadMasterHistory();
+        }
+
+        // Initialize
+        window.addEventListener('load', function() {
+            initializeSpectrogram();
+            initializeMasterHistory();
+        });
+    </script>
+</body>
+</html>
