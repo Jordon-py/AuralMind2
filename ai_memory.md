@@ -4,18 +4,19 @@
 - [2026-04-02] AuralMind2 - MCP-driven audio mastering and orchestration repo focused on mastering workflows, async jobs, and audio analysis - active
 
 ## Active Project Snapshot
-- Date: 2026-04-08
+- Date: 2026-04-24
 - Active project: AuralMind2
-- Goal: Use AuralMind2 to create premium trap masters with explicit stem/no-stem variants and Desktop delivery for `New Project (8).wav` and `New Project (9).wav`.
-- Current phase: 4-master premium delivery complete with AuralMind shaping, final loudness pass, and Desktop staging
-- Current blocker: none for the requested 4-master delivery; only optional follow-up is taste-based revision after listening
-- Next milestone: listen-check the four Desktop masters and revise only if Christopher wants alternate tone or louder/quieter variant targets
+- Goal: Upgrade the existing FastMCP mastering server through exactly six premium internals enhancements, preserve the public MCP tool surface, and master Christopher's requested 10 songs through the AuralMind2 MCP path.
+- Current phase: Deep-forge enhancement implementation and 10-song MCP mastering run complete; deployment and GitHub closeout in progress.
+- Current blocker: Prefect Horizon deployment requires Christopher's interactive Horizon/GitHub OAuth session; local FastMCP CLI has no `deploy` command in FastMCP 3.2.4.
+- Next milestone: push `deepforge/auralmind2-premium-upgrade`, then deploy in Horizon with entrypoint `server.py:mcp`.
 
 ## Important Paths
 - Project root: C:\Users\goku\Documents\AuralMind2
 - Source audio path: C:\Users\goku\Documents\AuralMind2\data
 - Mastering code path: C:\Users\goku\Documents\AuralMind2\mastering
 - Output root: C:\Users\goku\Documents\AuralMind2\Ignorance Is Bliss
+- Deep-forge output root: C:\Users\goku\Documents\AuralMind2\masters\deepforge_premium_upgrade_20260424
 - Desktop delivery path: C:\Users\goku\Desktop\AuralMind2 Premium Masters\New Project 8-9
 - Reports path: C:\Users\goku\Documents\AuralMind2\Ignorance Is Bliss\_reports
 - Manifests path: C:\Users\goku\Documents\AuralMind2\Ignorance Is Bliss\_manifests
@@ -29,10 +30,13 @@
 - C:\Users\goku\Documents\AuralMind2\archive\README.md - archive index explaining why legacy docs, notebooks, stale config, and duplicate engines were moved out of the repo root.
 - C:\Users\goku\Documents\AuralMind2\server.py - main MCP server implementation and likely local orchestration entrypoint
 - C:\Users\goku\Documents\AuralMind2\tools\run_explicit_premium_hifi_trap_batch.py - MCP-only explicit 10-song runner that connects with `fastmcp.Client`, uses server tools for analyze/plan/render/phase-align/export, and writes a resume manifest plus run log.
+- C:\Users\goku\Documents\AuralMind2\tests\test_maestro_premium_dsp.py - premium DSP regression tests for band analysis and mono-sub side-energy behavior.
 - C:\Users\goku\Documents\AuralMind2\README.md - repo usage and operational context
 - C:\Users\goku\Documents\AuralMind2\ai_memory.md - repo-local execution memory for this mastering run
 
 ## Architecture / Data Flow Notes
+- [2026-04-24] Deep-forge upgrades preserved the public FastMCP surface at 37 tools / 11 resources / 5 prompts while enriching existing schemas, heuristics, metadata, validation, health, and job lifecycle behavior.
+- [2026-04-24] Premium output metadata now includes material-aware metrics (`low_band_correlation`, `vocal_presence_db`, `low_mid_masking_db`, `sub_to_kick_balance_db`, harshness/tilt/LRA proxies) plus a `quality_report` on master/job results.
 - [2026-04-24] Explicit premium trap batch flow is MCP-only: `fastmcp.Client(server.mcp)` -> `bootstrap` / resources / prompt -> `register_audio_from_path` -> `analyze_audio` -> `plan_mastering_strategy` / `propose_master_settings` -> `run_master_job` / `job_status` / `job_result` -> `premium_phase_align` -> `analyze_audio` -> `read_artifact` export.
 - [2026-04-24] Premium phase alignment is now a first-class MCP tool, `premium_phase_align`, which applies zero-phase low-band isolation and material-aware mono centering to the chosen mastered artifact before export.
 - [2026-04-23] MCP connect guidance now has three layers: `FastMCP(instructions=...)` for clients that honor server instructions, `on_connect` / `premium_trap_mastering_session` prompts for prompt-capable clients, and resources (`auralmind://connect-kit`, `auralmind://premium-trap-workflow`, `auralmind://contracts`, `auralmind://control-surface`) for clients that must fetch guidance explicitly.
@@ -41,6 +45,12 @@
 - [2026-04-02] Core resources exposed by `AuralMind2`: `config://system-prompt`, `config://mcp-docs`, `config://maintainer-guide`, `config://server-info`, `auralmind://workflow`, `auralmind://metrics`, `auralmind://presets`, `auralmind://control-surface`, `auralmind://contracts`, `auralmind://connect-kit`.
 
 ## Progress Log
+- [2026-04-24] completed: used two specialist sub-agents for AuralMind2 deep-forge work. Mastering Intelligence Specialist audited musical quality opportunities; Python MCP Systems Specialist audited FastMCP architecture, validation, jobs, docs, tests, and deployment readiness.
+- [2026-04-24] changed: upgraded exactly six weak points without adding MCP tools/endpoints: mono-sub low-end discipline, richer premium analysis metrics, material-aware planning/scoring/retune logic, premium quality/audit metadata, restart-safe persisted job recovery, and deployment/request-shape/validation readiness.
+- [2026-04-24] fixed: live MCP mastering exposed `analyze_track_features` shadowing the `rms()` helper with a NumPy value; renamed the local value and added DSP regression coverage so premium band metrics work on real audio.
+- [2026-04-24] verified: `python -m py_compile server.py tools\\auralmind_maestro.py tests\\test_discovery_smoke.py tests\\test_mastering_ui_bridge.py tests\\test_semantic_planning.py tests\\test_maestro_premium_dsp.py` passed; `python -m unittest discover -s tests -q` passed with 30 tests OK; `fastmcp inspect server.py:mcp --format fastmcp` succeeded; bootstrap still reports 37 tools, 11 resources, 5 prompts.
+- [2026-04-24] completed: mastered the requested 10 songs through the existing AuralMind2 MCP flow into `masters\\deepforge_premium_upgrade_20260424`, with 10 final phase-aligned WAVs, 10 verified 24-bit stereo 48 kHz WAVs, 10 verified 32-bit-float stereo 48 kHz WAVs, and manifest status 10 done / 0 errors.
+- [2026-04-24] deployment: Prefect Horizon preflight is ready for repo `Jordon-py/AuralMind2` and entrypoint `server.py:mcp`; actual Horizon deploy is blocked locally by the required browser/GitHub OAuth flow at `https://horizon.prefect.io`.
 - [2026-04-24] changed: added MCP tool `premium_phase_align` to `server.py`, updated `resources/premium_trap_workflow.md`, and added `tools/run_explicit_premium_hifi_trap_batch.py` so the requested 10-song batch uses the MCP server only for planning, mastering, phase alignment, analysis, and artifact export.
 - [2026-04-24] verified: `python -m py_compile server.py tools\\run_explicit_premium_hifi_trap_batch.py`, `python -m pytest tests\\test_discovery_smoke.py -q`, and `python -m pytest -q` passed; FastMCP client discovery reported 37 tools including `premium_phase_align`; dry-run confirmed all 10 requested source files exist.
 - [2026-04-24] fixed: first MCP-only batch launch exposed FastMCP in-process argument wrapping for `req: Model` tools; patched the runner to wrap `register_audio_from_path`, `analyze_audio`, `plan_mastering_strategy`, `run_master_job`, `job_status`, `job_result`, and `premium_phase_align` payloads under `req`, then verified register/analyze through the MCP client.
@@ -255,3 +265,15 @@
 - metrics: final master measured `-15.01 LUFS`, `-0.97 dBTP`, and low-band phase correlation improved `0.9972 -> 0.9987`.
 - changed: `tools/run_explicit_premium_hifi_trap_batch.py` now supports `--source` for one-off renders and `--delivery-formats 24,32` for delivery encodes from the MCP artifact.
 - verified: `python -m pytest -q` passed with `23 passed`; delivery probes confirmed 24-bit PCM and 32-bit float stereo WAVs at 48 kHz.
+
+## 2026-04-24 DeepForge Premium Upgrade Completion Check
+- completed: Confirmed `masters/deepforge_premium_upgrade_20260424` finished the 10-song AuralMind2 MCP queue.
+- evidence: `run.log` ends with `queue_done done=10 error=0` and `lock_released`; `manifest.json` has 10 `items`, all marked `done`.
+- outputs: `final`, `delivery_24bit`, and `delivery_32bitfloat` each contain 10 WAV files; last finished track was `10_i-know__mcp_premium_hifi_trap_phase_aligned.wav`.
+- MCP note: repo-local SQLite recorded the final job `job_87db0b1b6017` as `done` at 100%, but connector-side polling returned `not_found`/`UNAVAILABLE`, so future status checks should trust run logs, manifest, outputs, and `data/maestro_state.db` together.
+
+## 2026-04-25 Requested 8-Song Same-Premium Batch
+- completed: Rendered Christopher's requested eight files (`Ride`, `SB`, `M.O (3)`, `Not the Same (3)`, `Vegas - top teir (1)`, `Vegas - top teir (2)`, `FaceTime (6)`, `DaddysGirls (2)`) through the same MCP-only premium hi-fi trap lane using `competitive_trap`, stem mode `off`, target `-12.2 LUFS`, movement `0.26`, and server-side `premium_phase_align`.
+- output: `masters/mcp_premium_hifi_trap_requested_8_20260425_py313` contains `final`, `delivery_24bit`, and `delivery_32bitfloat` with 8 WAVs each; `manifest.json` reports `done=8 error=0`.
+- delivery: created 44.1 kHz conversion-only outputs from the phase-aligned `final` masters in `final_44100_32bitfloat` (`pcm_f32le`) and `delivery_24bit_44100` (`pcm_s24le`), plus `manifest_44100hz.json`.
+- verified: ffprobe check across all 48 kHz and 44.1 kHz output folders returned `bad_count=0`; the render process released its lock. The repo `.venv` NumPy extension was unreadable, so this batch used `C:\Python313\python.exe`, which successfully imported NumPy and FastMCP.

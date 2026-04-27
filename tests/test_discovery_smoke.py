@@ -1,3 +1,16 @@
+"""
+Discovery and contract smoke tests for the AuralMind2 FastMCP surface.
+
+Data shapes: FastMCP bootstrap payloads, resource JSON strings, HTTP JSON
+health payloads, and Pydantic upload models.
+Syntax: run with `python -m pytest tests/test_discovery_smoke.py`.
+Important tests: `DiscoverySmokeTests` around line 16 checks catalog/resource
+alignment, request examples, health routes, and prompt/resource availability.
+Possible bugs: these tests do not render audio, so DSP regressions need
+separate coverage. Extend by adding schema-diff snapshots and hosted transport
+fixture tests.
+"""
+
 import json
 import os
 import unittest
@@ -92,6 +105,23 @@ class DiscoverySmokeTests(unittest.TestCase):
             name = params.get("name")
             self.assertIn(name, tool_names)
         self.assertIn("plan_mastering_strategy", tool_names)
+
+    def test_bootstrap_examples_wrap_model_backed_tools_under_req(self) -> None:
+        examples = server.bootstrap().example_calls
+        req_wrapped = {
+            "plan_mastering_strategy",
+            "propose_master_settings",
+            "master_once",
+            "run_master_job",
+            "job_status",
+            "job_result",
+            "register_audio_from_path",
+        }
+
+        for name in req_wrapped:
+            self.assertIn("req", examples[name]["params"]["arguments"])
+
+        self.assertEqual(examples["list_session_state"]["params"]["arguments"], {})
 
     def test_upload_model_rejects_missing_or_conflicting_payloads(self) -> None:
         with self.assertRaises(ValidationError):

@@ -1,0 +1,44 @@
+/**
+ * Purpose: AuralMind2 visual tokens for the premium React workspace.
+ * Data shapes: CSS custom properties for color, spacing, radius, shadow, and
+ * typography roles consumed by app.css.
+ * Syntax: imported by src/App.tsx before app.css.
+ * Important functions: none; theme variables only.
+ * Possible bugs: token drift can occur if component files add raw colors.
+ * Enhance next: expose dark-mode tokens; map tokens to shadcn semantic colors.
+ */
+
+:root {
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+
+  --color-canvas: #f7f4ef;
+  --color-surface: #fffdf9;
+  --color-surface-strong: #ffffff;
+  --color-ink: #181817;
+  --color-muted: #6b6760;
+  --color-soft: #948e84;
+  --color-border: #ded8ce;
+  --color-border-strong: #cfc7bb;
+  --color-accent: #0e6f68;
+  --color-accent-soft: #dcefed;
+  --color-amber: #a46a22;
+  --color-amber-soft: #f3e4cf;
+  --color-error: #9a2f2f;
+  --color-error-soft: #f4dfdc;
+  --color-success: #276b43;
+  --color-success-soft: #dff0e4;
+
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --shadow-panel: 0 18px 40px rgba(57, 49, 38, 0.08);
+  --shadow-focus: 0 0 0 3px rgba(14, 111, 104, 0.22);
+
+  font-family: var(--font-sans);
+  color: var(--color-ink);
+  background: var(--color-canvas);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}

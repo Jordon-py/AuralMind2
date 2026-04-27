@@ -20,15 +20,16 @@ The exported `app` is intended for hosts such as Render. The `main()` entry
 point preserves direct `python server.py` execution and selects transport from
 environment variables.
 
-Data shapes: Pydantic request/response models (`MasterRequest`,
-`JobStatusOut`, `ArtifactReadResult`), dataclass runtime state (`JobState`,
-`ArtifactEntry`), and Maestro preset dataclasses from `tools/auralmind_maestro.py`.
-Important functions: `get_premium_trap_workflow_resource` at line 3328,
-`premium_trap_mastering_session_prompt` at line 3468, `run_master_job` at
-line 3831, `job_status` at line 3859, `master_audio` at line 4031, and
-`premium_phase_align` at line 4418.
-Possible bugs: stale persisted job rows can outlive worker processes, and tests
-may use smaller fake preset dataclasses than the full Maestro engine.
+Data shapes: Pydantic request/response models (`AudioMetrics`,
+`MasterRequest`, `JobStatusOut`, `JobResultOut`, `ArtifactReadResult`),
+dataclass runtime state (`JobState`, `ArtifactEntry`), and Maestro preset
+dataclasses from `tools/auralmind_maestro.py`.
+Important functions: `_build_semantic_control_profile` around line 2500,
+`_master_internal` around line 3000, `run_master_job` around line 3900,
+`job_result` around line 3950, `premium_phase_align` around line 4500, and
+`health_check` around line 5050.
+Possible bugs: hosted health can still pass when optional heavy DSP dependencies
+are missing, and strict clients may not accept additive response fields.
 Enhancement paths: split contracts/resources/tools into modules, and move job
 execution state behind a repository class with focused tests.
 """
@@ -194,7 +195,13 @@ BOOTSTRAP_WORKFLOW_STEPS = [
 BOOTSTRAP_EXAMPLE_CALLS = {
     "bootstrap": {"method": "tools/call", "params": {"name": "bootstrap", "arguments": {}}},
     "list_presets": {"method": "tools/call", "params": {"name": "list_presets", "arguments": {}}},
-    "master_once": {"method": "tools/call", "params": {"name": "master_audio", "arguments": {"audio_id": "aud_...", "preset_name": "hi_fi_streaming"}}}
+    "master_once": {
+        "method": "tools/call",
+        "params": {
+            "name": "master_audio",
+            "arguments": {"req": {"audio_id": "aud_...", "preset_name": "hi_fi_streaming"}},
+        },
+    },
 }
 MAX_UPLOAD_HEX_CHARS = MAX_UPLOAD_BYTES * 2
 UPLOAD_CHUNK_MAX_BYTES = int(os.environ.get("UPLOAD_CHUNK_MAX_BYTES", str(1024 * 1024)))  # 1 MiB
@@ -397,6 +404,9 @@ _MAESTRO_DB_LOCK = threading.Lock()
 MAESTRO_DB_PATH = os.path.join(DATA_DIR, "maestro_state.db")
 
 def _init_db() -> None:
+    db_parent = os.path.dirname(os.path.abspath(MAESTRO_DB_PATH))
+    if db_parent:
+        os.makedirs(db_parent, exist_ok=True)
     with sqlite3.connect(MAESTRO_DB_PATH) as conn:
         conn.execute('''
             CREATE TABLE IF NOT EXISTS jobs (
@@ -415,11 +425,11 @@ def _init_db() -> None:
 _init_db()
 
 def _get_job_from_db(job_id: str) -> Optional["JobState"]:
-    with sqlite3.connect(MAESTRO_DB_PATH) as conn:
-        cur = conn.execute("SELECT data FROM jobs WHERE job_id = ?", (job_id,))
-        row = cur.fetchone()
+    with _MAESTRO_DB_LOCK:
+        with sqlite3.connect(MAESTRO_DB_PATH) as conn:
+            cur = conn.execute("SELECT data FROM jobs WHERE job_id = ?", (job_id,))
+            row = cur.fetchone()
         if row:
-            import json
             data = json.loads(row[0])
             if data.get("error") is not None:
                 data["error"] = ErrorEnvelope(**data["error"])
@@ -449,12 +459,12 @@ def _job_state_to_jsonable(job: "JobState") -> Dict[str, Any]:
 
 
 def _set_job_in_db(job: "JobState") -> None:
-    with sqlite3.connect(MAESTRO_DB_PATH) as conn:
-        import json
-        conn.execute(
-            "INSERT OR REPLACE INTO jobs (job_id, data) VALUES (?, ?)",
-            (job.job_id, json.dumps(_job_state_to_jsonable(job))),
-        )
+    with _MAESTRO_DB_LOCK:
+        with sqlite3.connect(MAESTRO_DB_PATH) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO jobs (job_id, data) VALUES (?, ?)",
+                (job.job_id, json.dumps(_job_state_to_jsonable(job))),
+            )
 
 _JOB_EXECUTOR = ThreadPoolExecutor(
     max_workers=int(os.environ.get("MAX_MASTER_JOBS", "2"))
@@ -578,10 +588,43 @@ class AudioMetrics(StrictBaseModel):
     crest_db: float = Field(..., description="Crest factor in dB.")
     stereo_correlation: float = Field(..., description="Stereo correlation coefficient.")
     duration_s: float = Field(..., description="Duration in seconds.")
-    # Optional metadata
+    # Optional core metadata
     peak_dbfs: Optional[float] = None
     rms_dbfs: Optional[float] = None
     centroid_hz: Optional[float] = None
+    # Optional premium planning and QC metadata
+    low_band_correlation: Optional[float] = Field(
+        None,
+        description="Stereo correlation in the sub/low band; higher is more mono-compatible.",
+    )
+    high_band_correlation: Optional[float] = Field(
+        None,
+        description="Stereo correlation in the high band used for width safety.",
+    )
+    vocal_presence_db: Optional[float] = Field(
+        None,
+        description="Presence-band energy minus low-mid energy, used as a vocal intelligibility proxy.",
+    )
+    low_mid_masking_db: Optional[float] = Field(
+        None,
+        description="Low-mid energy over presence energy; positive values can imply masking.",
+    )
+    sub_to_kick_balance_db: Optional[float] = Field(
+        None,
+        description="Sub-band energy minus kick-band energy for bass/kick coexistence checks.",
+    )
+    harshness_index_db: Optional[float] = Field(
+        None,
+        description="Harsh-band energy over presence-band energy for fatigue risk checks.",
+    )
+    spectral_tilt_db: Optional[float] = Field(
+        None,
+        description="Air-band energy minus low-mid energy as a broad tonal tilt proxy.",
+    )
+    lra_proxy_db: Optional[float] = Field(
+        None,
+        description="Lightweight loudness-range proxy from short-term RMS windows.",
+    )
 
 
 class AnalyzeIn(StrictBaseModel):
@@ -657,7 +700,7 @@ class MasteringControlProfile(StrictBaseModel):
 
 class MasterSettings(StrictBaseModel):
     preset_name: str = Field(default="hi_fi_streaming", description="Base preset.")
-    target_lufs: float = Field(default=-12.0, description="Target LUFS.")
+    target_lufs: float = Field(default=-12.0, ge=-20.0, le=-6.0, description="Target LUFS.")
     warmth: float = Field(default=0.5, ge=0.0, le=1.0, description="Warmth (0-1).")
     transient_boost_db: float = Field(default=1.0, ge=0.0, le=4.0, description="Transient boost.")
     enable_harshness_limiter: bool = Field(default=True, description="Enable harshness filter.")
@@ -681,15 +724,39 @@ class MasterSettings(StrictBaseModel):
         le=-0.4,
         description="Override governor GR limit.",
     )
-    stem_gains_db: Optional[Dict[str, float]] = Field(default=None, description="Demucs stem gain adjustments (dB).")
+    stem_gains_db: Optional[Dict[str, float]] = Field(
+        default=None,
+        description="Demucs stem gain adjustments in dB. Each bounded to -9..9 dB for mastering-safe moves.",
+    )
     stem_mode: StemMode = Field(
         default="auto",
         description="Stem-separation policy. off skips Demucs, auto uses a bounded heuristic, on forces stem processing.",
     )
 
+    @model_validator(mode="after")
+    def _validate_stem_gain_bounds(self) -> "MasterSettings":
+        if self.stem_gains_db is None:
+            return self
+        for stem_name, gain_db in self.stem_gains_db.items():
+            if not str(stem_name).strip():
+                raise ValueError("invalid_stem_name")
+            if not np.isfinite(float(gain_db)):
+                raise ValueError("invalid_stem_gain")
+            if float(gain_db) < -9.0 or float(gain_db) > 9.0:
+                raise ValueError("stem_gain_out_of_range")
+        return self
+
 
 class MasterRequest(MasterSettings):
     audio_id: str = Field(..., description="Source audio handle.")
+
+
+class MasterQualityReport(StrictBaseModel):
+    verdict: str = Field(..., description="Premium QC verdict such as premium_ready or review_recommended.")
+    score: float = Field(..., description="Deterministic lower-is-better quality score.")
+    highlights: List[str] = Field(default_factory=list, description="Positive musical/technical signals.")
+    cautions: List[str] = Field(default_factory=list, description="Remaining musical/technical tradeoffs.")
+    recommended_next_step: str = Field(..., description="Actionable next step for the client or engineer.")
 
 
 class MasterResult(StrictBaseModel):
@@ -699,6 +766,10 @@ class MasterResult(StrictBaseModel):
     metrics_after: AudioMetrics
     tuning_trace_id: str = Field(..., description="Handle for the tuning trace JSON.")
     artifacts: List[str] = Field(default_factory=list, description="Artifact handles created by this run.")
+    quality_report: Optional[MasterQualityReport] = Field(
+        default=None,
+        description="Premium QC summary explaining why the result is ready or what to revise.",
+    )
 
 
 class ProposedSettingsOut(StrictBaseModel):
@@ -762,6 +833,7 @@ class JobStatusOut(StrictBaseModel):
 
 class ArtifactSummary(StrictBaseModel):
     artifact_id: str = Field(..., description="Artifact handle.")
+    kind: str = Field(..., description="Artifact role such as audio, mastered_audio, metrics, or trace.")
     filename: str = Field(..., description="Stored filename.")
     media_type: str = Field(..., description="MIME type.")
     size_bytes: int = Field(..., description="Size in bytes.")
@@ -771,9 +843,15 @@ class ArtifactSummary(StrictBaseModel):
 class JobResultOut(StrictBaseModel):
     job_id: str = Field(..., description="Job ID.")
     status: JobStatus = Field(..., description="Final job status.")
+    master_wav_id: str = Field(..., description="Primary mastered WAV artifact handle.")
+    tuning_trace_id: str = Field(..., description="Trace JSON artifact handle for auditability.")
     artifacts: List[ArtifactSummary] = Field(..., description="Generated artifacts.")
     metrics: AudioMetrics = Field(..., description="Final mastering metrics.")
     precision: BitDepth = Field(..., description="Output precision.")
+    quality_report: Optional[MasterQualityReport] = Field(
+        default=None,
+        description="Premium QC summary from the completed render.",
+    )
 
 
 class ClosedLoopRequest(StrictBaseModel):
@@ -1609,57 +1687,64 @@ def _tool_contract_map() -> Dict[str, Dict[str, str]]:
 
 
 def _bootstrap_example_calls(packet: ConnectPacketOut) -> Dict[str, Any]:
+    no_req_wrapper = {
+        "bootstrap",
+        "capabilities",
+        "get_connect_packet",
+        "list_session_state",
+        "list_audio_assets",
+        "list_data_audio",
+        "list_presets",
+        "upload_audio_to_session",
+        "read_artifact",
+    }
+
+    def tool_call(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        wrapped = arguments if name in no_req_wrapper or not arguments else {"req": arguments}
+        return {"method": "tools/call", "params": {"name": name, "arguments": wrapped}}
+
     examples = {
-        "bootstrap": {"method": "tools/call", "params": {"name": "bootstrap", "arguments": {}}},
-        "capabilities": {"method": "tools/call", "params": {"name": "capabilities", "arguments": {}}},
-        "get_connect_packet": {"method": "tools/call", "params": {"name": "get_connect_packet", "arguments": {}}},
-        "list_session_state": {"method": "tools/call", "params": {"name": "list_session_state", "arguments": {}}},
-        "list_presets": {"method": "tools/call", "params": {"name": "list_presets", "arguments": {}}},
-        "plan_mastering_strategy": {
-            "method": "tools/call",
-            "params": {
-                "name": "plan_mastering_strategy",
-                "arguments": {
-                    "audio_id": "aud_1234567890ab",
-                    "goal": "Wide, controlled, streaming-ready master with punchy lows",
-                    "platform": "spotify",
-                    "stem_mode": "auto",
-                },
+        "bootstrap": tool_call("bootstrap", {}),
+        "capabilities": tool_call("capabilities", {}),
+        "get_connect_packet": tool_call("get_connect_packet", {}),
+        "list_session_state": tool_call("list_session_state", {}),
+        "list_presets": tool_call("list_presets", {}),
+        "plan_mastering_strategy": tool_call(
+            "plan_mastering_strategy",
+            {
+                "audio_id": "aud_1234567890ab",
+                "goal": "Wide, controlled, streaming-ready master with punchy lows",
+                "platform": "spotify",
+                "stem_mode": "auto",
             },
-        },
-        "propose_master_settings": {
-            "method": "tools/call",
-            "params": {
-                "name": "propose_master_settings",
-                "arguments": {
-                    "preset_name": "hi_fi_streaming",
-                    "target_lufs": -12.4,
-                    "warmth": 0.2,
-                    "transient_boost_db": 2.1,
-                    "enable_harshness_limiter": True,
-                    "enable_air_motion": True,
-                    "bit_depth": "float32",
-                    "control_profile": {
-                        "spatial_width": 0.45,
-                        "brightness_tilt": 0.25,
-                    },
-                    "stem_mode": "auto",
+        ),
+        "propose_master_settings": tool_call(
+            "propose_master_settings",
+            {
+                "preset_name": "hi_fi_streaming",
+                "target_lufs": -12.4,
+                "warmth": 0.2,
+                "transient_boost_db": 2.1,
+                "enable_harshness_limiter": True,
+                "enable_air_motion": True,
+                "bit_depth": "float32",
+                "control_profile": {
+                    "spatial_width": 0.45,
+                    "brightness_tilt": 0.25,
                 },
+                "stem_mode": "auto",
             },
-        },
-        "master_once": {
-            "method": "tools/call",
-            "params": {
-                "name": "master_audio",
-                "arguments": {
-                    "audio_id": "aud_1234567890ab",
-                    "preset_name": "hi_fi_streaming",
-                },
+        ),
+        "master_once": tool_call(
+            "master_audio",
+            {
+                "audio_id": "aud_1234567890ab",
+                "preset_name": "hi_fi_streaming",
             },
-        },
+        ),
     }
     for name, arguments in packet.example_calls.items():
-        examples[name] = {"method": "tools/call", "params": {"name": name, "arguments": arguments}}
+        examples[name] = tool_call(name, arguments)
     return examples
 
 
@@ -2084,6 +2169,17 @@ def _get_job(job_id: str) -> Optional[JobState]:
 
     job = _get_job_from_db(job_id)
     if job is not None:
+        if job.status in ("queued", "running"):
+            previous_status = job.status
+            job.status = "error"
+            job.progress = max(int(job.progress), 100)
+            job.finished_at = time.time()
+            job.error = _make_error(
+                "stale_job_recovered",
+                "Persisted job was found without a live worker; rerun the master from the original audio handle.",
+                {"job_id": job.job_id, "previous_status": previous_status},
+            )
+            _set_job_in_db(job)
         with _JOBS_LOCK:
             _JOBS[job_id] = job
         return replace(job)
@@ -2094,7 +2190,10 @@ def _update_job(job_id: str, **updates: Any) -> None:
     with _JOBS_LOCK:
         job = _JOBS.get(job_id)
         if job is None:
-            return
+            job = _get_job_from_db(job_id)
+            if job is None:
+                return
+            _JOBS[job_id] = job
         for key, value in updates.items():
             if key == "progress":
                 value = max(0, min(100, int(value)))
@@ -2111,6 +2210,7 @@ def _job_elapsed(job: JobState) -> float:
 def _artifact_summary(entry: ArtifactEntry) -> ArtifactSummary:
     return ArtifactSummary(
         artifact_id=entry.artifact_id,
+        kind=entry.kind,
         filename=entry.filename,
         media_type=entry.media_type,
         size_bytes=entry.size_bytes,
@@ -2149,15 +2249,33 @@ def _require_maestro() -> Any:
     return maestro
 
 
+def _engine_health() -> Dict[str, Any]:
+    maestro, err = _get_maestro()
+    if err or maestro is None:
+        return {
+            "ready": False,
+            "code": (err or {}).get("code", "engine_unavailable"),
+            "message": (err or {}).get("message", "DSP engine unavailable."),
+        }
+    return {
+        "ready": True,
+        "demucs_available": bool(getattr(maestro, "HAS_DEMUCS", False)),
+        "presets": sorted(str(name) for name in maestro.get_presets().keys()),
+    }
+
+
 def _as_bit_depth(value: Any) -> BitDepth:
-    return "float64" if str(value) == "float64" else "float32"
+    bit_depth = str(value)
+    if bit_depth in ("float32", "float64"):
+        return cast(BitDepth, bit_depth)
+    raise ValueError(f"invalid_bit_depth: {value}")
 
 
 def _as_stem_mode(value: Any) -> StemMode:
     mode = str(value)
     if mode in ("off", "auto", "on"):
         return cast(StemMode, mode)
-    return "auto"
+    raise ValueError(f"invalid_stem_mode: {value}")
 
 
 def _width_bias_label(width_hi: float) -> str:
@@ -2322,9 +2440,7 @@ def _normalize_master_settings(settings: MasterSettings) -> MasterSettings:
     if settings.preset_name not in presets:
         raise ValueError(f"unknown_preset: {settings.preset_name}")
 
-    bit_depth = str(settings.bit_depth)
-    if bit_depth not in ("float32", "float64"):
-        raise ValueError("invalid_bit_depth")
+    bit_depth = _as_bit_depth(settings.bit_depth)
 
     governor_steps = settings.governor_search_steps
     if governor_steps is not None:
@@ -2334,21 +2450,30 @@ def _normalize_master_settings(settings: MasterSettings) -> MasterSettings:
     if governor_gr_limit is not None:
         governor_gr_limit = round(max(-6.0, min(-0.4, float(governor_gr_limit))), 2)
 
+    target_lufs = float(settings.target_lufs)
+    if target_lufs < -20.0 or target_lufs > -6.0:
+        raise ValueError("target_lufs_out_of_range")
+
     stem_gains: Optional[Dict[str, float]] = None
     if settings.stem_gains_db:
-        stem_gains = {
-            str(name): round(max(-12.0, min(12.0, float(gain))), 2)
-            for name, gain in settings.stem_gains_db.items()
-        }
+        stem_gains = {}
+        for name, gain in settings.stem_gains_db.items():
+            gain_value = float(gain)
+            if not np.isfinite(gain_value):
+                raise ValueError("invalid_stem_gain")
+            if gain_value < -9.0 or gain_value > 9.0:
+                raise ValueError("stem_gain_out_of_range")
+            stem_gains[str(name)] = round(gain_value, 2)
     stem_mode = settings.stem_mode
     if stem_mode is None:
         stem_mode = "auto"
+    stem_mode = _as_stem_mode(stem_mode)
     if stem_gains:
         stem_mode = "on"
 
     return MasterSettings(
         preset_name=str(settings.preset_name),
-        target_lufs=round(max(-20.0, min(-6.0, float(settings.target_lufs))), 2),
+        target_lufs=round(target_lufs, 2),
         warmth=round(max(0.0, min(1.0, float(settings.warmth))), 3),
         transient_boost_db=round(max(0.0, min(4.0, float(settings.transient_boost_db))), 3),
         enable_harshness_limiter=bool(settings.enable_harshness_limiter),
@@ -2519,9 +2644,29 @@ def _build_semantic_control_profile(
     if metrics.centroid_hz is not None and metrics.centroid_hz > 4200:
         values["harshness_control"] += 0.3
         warnings.append("Measured centroid is bright; the plan adds extra harshness protection.")
+    low_corr = metrics.low_band_correlation if metrics.low_band_correlation is not None else metrics.stereo_correlation
+    if low_corr < 0.65:
+        values["low_end_focus"] = min(values["low_end_focus"], 0.35)
+        values["spatial_width"] = min(values["spatial_width"], 0.1)
+        warnings.append("Low-band correlation is fragile, so sub weight and width are capped for mono translation.")
     if metrics.stereo_correlation < 0.08:
         values["spatial_width"] = min(values["spatial_width"], 0.2)
         warnings.append("Stereo correlation is already fragile; width expansion is intentionally capped.")
+    if (metrics.vocal_presence_db or 0.0) < -5.0:
+        values["brightness_tilt"] += 0.22
+        values["harshness_control"] += 0.12
+        reasoning.append("Presence is sitting behind the low-mid bed, so the plan adds intelligibility without opening harshness unchecked.")
+    if (metrics.low_mid_masking_db or 0.0) > 6.0:
+        values["low_end_focus"] -= 0.18
+        values["brightness_tilt"] += 0.12
+        warnings.append("Low-mid masking is elevated; the plan trims density and restores presence contrast.")
+    if abs(metrics.sub_to_kick_balance_db or 0.0) > 7.0:
+        values["low_end_focus"] -= 0.12
+        values["movement_amount"] += 0.08
+        reasoning.append("Sub and kick balance is uneven, so the plan eases low-end density and recovers rhythmic punch.")
+    if (metrics.harshness_index_db or 0.0) > 2.0:
+        values["harshness_control"] += 0.25
+        warnings.append("Harshness-band energy is high relative to presence, so fatigue protection is increased.")
     if metrics.crest_db > 12.0:
         values["movement_amount"] -= 0.2
         reasoning.append("High crest factor suggests preserving transient openness instead of adding extra movement.")
@@ -2559,6 +2704,10 @@ def _choose_semantic_preset(
         if _goal_has(goal, "trap", "808", "sub", "bass"):
             return "competitive_trap", "Trap or sub-heavy goal language points to the competitive_trap preset."
         return "club_clean", "Club-oriented goal language points to the club_clean preset."
+    if _goal_has(goal, "melodic", "vocal", "hook", "rap") and (metrics.vocal_presence_db or 0.0) < -3.0:
+        return "radio_loud", "Melodic or vocal-forward material with low presence points to the radio_loud preset."
+    if _goal_has(goal, "trap", "808", "sub", "bass") and (metrics.low_band_correlation or 1.0) < 0.65:
+        return "competitive_trap", "Trap low end needs the competitive_trap lane with extra mono-safe sub discipline."
     if _goal_has(goal, "cinematic", "film", "epic", "spacious", "wide", "3d", "atmospheric"):
         return "cinematic", "Cinematic or spacious goal language points to the cinematic preset."
     if _goal_has(goal, "radio", "commercial", "pop", "vocal", "hook"):
@@ -2594,6 +2743,12 @@ def _build_semantic_overrides(
     if metrics.centroid_hz is not None and metrics.centroid_hz > 4500:
         target_lufs -= 0.15
         warnings.append("Bright source material receives a small loudness backoff to protect harshness.")
+    if (metrics.low_mid_masking_db or 0.0) > 6.0 and _goal_has(goal_text, "vocal", "melodic", "clear", "presence"):
+        target_lufs -= 0.15
+        warnings.append("Masked vocal/presence material receives a small loudness backoff so clarity is not traded for density.")
+    if (metrics.low_band_correlation or 1.0) < 0.65 and _goal_has(goal_text, "808", "sub", "bass", "trap"):
+        target_lufs -= 0.1
+        warnings.append("Low-band phase fragility receives a small loudness backoff for translation-safe sub control.")
     target_lufs = round(
         max(PLATFORM_TARGET_RANGES[str(platform)][0], min(PLATFORM_TARGET_RANGES[str(platform)][1], target_lufs)),
         2,
@@ -2620,6 +2775,9 @@ def _build_semantic_overrides(
     elif metrics.crest_db < 8.0:
         transient_boost += 0.2
         reasoning.append("Low crest factor suggests a small transient lift to recover punch.")
+    if abs(metrics.sub_to_kick_balance_db or 0.0) > 7.0:
+        transient_boost += 0.15
+        reasoning.append("Uneven sub/kick balance gets a modest transient lift so impact survives low-end weight.")
 
     enable_harshness_limiter = bool(getattr(preset, "enable_harshness_limiter", True))
     if control_profile is not None and (control_profile.harshness_control or 0.0) >= -0.2:
@@ -2813,7 +2971,7 @@ def _preset_overrides_from_settings(base_preset: Any, settings: MasterSettings) 
     p_args["enable_movement"] = p_args["movement_amount"] >= 0.03
     p_args["enable_hooklift"] = p_args["hooklift_mix"] >= 0.03
     p_args["mono_sub_base_mix"] = round(
-        max(0.45, min(0.65, float(getattr(base_preset, "mono_sub_base_mix", 0.55)) - (low_end * 0.05))),
+        max(0.45, min(0.68, float(getattr(base_preset, "mono_sub_base_mix", 0.55)) + (low_end * 0.04))),
         3,
     )
     return supported_preset_args(p_args)
@@ -2830,10 +2988,108 @@ def _calculate_score(metrics: AudioMetrics, target_lufs: float, ceiling: float) 
     elif metrics.crest_db > 12.0:
         penalty_crest = metrics.crest_db - 12.0
 
-    penalty_corr = max(0.0, 0.05 - metrics.stereo_correlation)
+    high_corr = metrics.high_band_correlation if metrics.high_band_correlation is not None else metrics.stereo_correlation
+    low_corr = metrics.low_band_correlation if metrics.low_band_correlation is not None else metrics.stereo_correlation
+    penalty_corr = max(0.0, 0.05 - high_corr)
+    penalty_low_corr = max(0.0, 0.78 - low_corr)
+    penalty_masking = max(0.0, (metrics.low_mid_masking_db or 0.0) - 5.5) / 3.0
+    penalty_vocal = max(0.0, -4.0 - (metrics.vocal_presence_db or 0.0)) / 3.0
+    penalty_sub_kick = max(0.0, abs(metrics.sub_to_kick_balance_db or 0.0) - 7.0) / 4.0
+    penalty_harshness = max(0.0, (metrics.harshness_index_db or 0.0) - 2.0) / 2.0
 
-    score = (2.0 * lufs_delta) + (5.0 * tp_violation) + (1.5 * penalty_crest) + (2.0 * penalty_corr)
+    score = (
+        (2.0 * lufs_delta)
+        + (5.0 * tp_violation)
+        + (1.5 * penalty_crest)
+        + (2.0 * penalty_corr)
+        + (2.4 * penalty_low_corr)
+        + (1.2 * penalty_masking)
+        + (1.1 * penalty_vocal)
+        + (1.1 * penalty_sub_kick)
+        + (1.4 * penalty_harshness)
+    )
     return round(score, 3)
+
+
+def _quality_label(value: Optional[float], good: float, risky: float, *, higher_is_better: bool = True) -> str:
+    if value is None:
+        return "unknown"
+    if higher_is_better:
+        if value >= good:
+            return "strong"
+        if value < risky:
+            return "risk"
+    else:
+        if value <= good:
+            return "strong"
+        if value > risky:
+            return "risk"
+    return "watch"
+
+
+def _build_quality_report(
+    *,
+    settings: MasterSettings,
+    metrics_before: AudioMetrics,
+    metrics_after: AudioMetrics,
+    score: float,
+) -> MasterQualityReport:
+    highlights: List[str] = []
+    cautions: List[str] = []
+
+    lufs_delta = abs(metrics_after.integrated_lufs - settings.target_lufs)
+    if lufs_delta <= 0.8:
+        highlights.append(f"Loudness landed within {lufs_delta:.2f} LU of the target.")
+    else:
+        cautions.append(f"Loudness is {lufs_delta:.2f} LU from target; audition before release.")
+
+    if metrics_after.true_peak_dbtp <= -0.7:
+        highlights.append(f"True peak is controlled at {metrics_after.true_peak_dbtp:.2f} dBTP.")
+    elif metrics_after.true_peak_dbtp <= -0.2:
+        cautions.append("True peak is close to the ceiling; avoid extra delivery gain.")
+    else:
+        cautions.append("True peak is hot enough to require a delivery safety check.")
+
+    low_corr_label = _quality_label(metrics_after.low_band_correlation, 0.9, 0.72)
+    if low_corr_label == "strong":
+        highlights.append("Low-end correlation is mono-safe for 808/sub translation.")
+    elif low_corr_label == "risk":
+        cautions.append("Low-end correlation remains fragile; phase-align or rerender tighter.")
+
+    vocal_label = _quality_label(metrics_after.vocal_presence_db, -2.0, -5.5)
+    if vocal_label == "strong":
+        highlights.append("Presence balance suggests vocals and melodic hooks should read clearly.")
+    elif vocal_label == "risk":
+        cautions.append("Presence may still be masked by the low-mid bed.")
+
+    sub_kick = abs(metrics_after.sub_to_kick_balance_db or 0.0)
+    if sub_kick <= 5.0:
+        highlights.append("Sub and kick bands are balanced enough to keep punch under bass weight.")
+    elif sub_kick > 8.0:
+        cautions.append("Sub/kick balance is skewed; check small speakers and car playback.")
+
+    if (metrics_after.harshness_index_db or 0.0) <= 1.5:
+        highlights.append("Harshness index is restrained for loud playback.")
+    elif (metrics_after.harshness_index_db or 0.0) > 3.0:
+        cautions.append("Harshness index is elevated; bright systems may expose fatigue.")
+
+    if not cautions:
+        verdict = "premium_ready"
+        next_step = "Export delivery formats and do a human listen check against the reference lane."
+    elif score <= 4.0 and len(cautions) <= 2:
+        verdict = "premium_with_cautions"
+        next_step = "Listen on headphones and small speakers; rerender only if the cautions are audible."
+    else:
+        verdict = "review_recommended"
+        next_step = "Use the cautions as the next retune target before treating this as release-ready."
+
+    return MasterQualityReport(
+        verdict=verdict,
+        score=round(score, 3),
+        highlights=highlights,
+        cautions=cautions,
+        recommended_next_step=next_step,
+    )
 
 
 def _retune_control_profile(
@@ -2862,6 +3118,21 @@ def _retune_control_profile(
             )
         )
 
+    low_corr = metrics.low_band_correlation if metrics.low_band_correlation is not None else metrics.stereo_correlation
+    if low_corr < 0.72:
+        apply_delta(
+            "spatial_width",
+            -0.16,
+            "low_band_phase_fragility",
+            f"Low-band correlation is {low_corr:.3f}, so width is tightened before the next pass.",
+        )
+        apply_delta(
+            "low_end_focus",
+            -0.1,
+            "mono_sub_translation",
+            "Low-end focus is eased so the mono-sub stage can center 808 energy without extra density.",
+        )
+
     if metrics.stereo_correlation < 0.05:
         apply_delta(
             "spatial_width",
@@ -2883,6 +3154,40 @@ def _retune_control_profile(
             0.18,
             "bright_or_hot_source",
             "The source is bright or peak-hot, so upper-mid protection is increased slightly.",
+        )
+    if (metrics.harshness_index_db or 0.0) > 2.0:
+        apply_delta(
+            "harshness_control",
+            0.16,
+            "harshness_band_risk",
+            "Harsh-band energy is elevated relative to presence, so fatigue control is raised.",
+        )
+    if (metrics.low_mid_masking_db or 0.0) > 6.0:
+        apply_delta(
+            "brightness_tilt",
+            0.12,
+            "presence_masking",
+            "Low-mid masking is high, so a small presence tilt helps vocals and melody stay readable.",
+        )
+        apply_delta(
+            "low_end_focus",
+            -0.08,
+            "low_mid_cleanup",
+            "Low-end density is trimmed to reduce masking around the body of the mix.",
+        )
+    if (metrics.vocal_presence_db or 0.0) < -5.0:
+        apply_delta(
+            "brightness_tilt",
+            0.1,
+            "vocal_presence_recovery",
+            "Presence sits behind the bed, so the next pass nudges intelligibility forward.",
+        )
+    if abs(metrics.sub_to_kick_balance_db or 0.0) > 7.0:
+        apply_delta(
+            "movement_amount",
+            0.05,
+            "kick_sub_coexistence",
+            "Uneven sub/kick balance gets a little more transient movement to preserve bounce.",
         )
 
     if metrics.crest_db < 7.5:
@@ -2987,7 +3292,7 @@ def _master_internal(
     base_p = presets[req.preset_name]
     preset = replace(base_p, **_preset_overrides_from_settings(base_p, req))
 
-    maestro.master(
+    render_info = maestro.master(
         target_path=_artifact_data_path(session_dir, entry.data_filename),
         out_path=out_wav_path,
         preset=preset
@@ -3009,6 +3314,18 @@ def _master_internal(
     metrics_after = _analyze_internal(master_wav_id, ctx, session_key=session_key, session_dir=session_dir)
     if progress_cb:
         progress_cb(85)
+
+    quality_score = _calculate_score(
+        metrics_after,
+        target_lufs=float(req.target_lufs),
+        ceiling=float(getattr(preset, "ceiling_dbfs", -1.0)),
+    )
+    quality_report = _build_quality_report(
+        settings=req,
+        metrics_before=metrics_before,
+        metrics_after=metrics_after,
+        score=quality_score,
+    )
 
     # Save metrics JSONs as required by spec
     metrics_before_id = _new_id("art")
@@ -3033,11 +3350,25 @@ def _master_internal(
 
     # Tuning trace
     trace_id = _new_id("art")
+    artifact_roles = {
+        master_wav_id: "primary_master_wav",
+        metrics_before_id: "metrics_before",
+        metrics_after_id: "metrics_after",
+        trace_id: "tuning_trace",
+    }
     trace_data = {
         "run_id": run_id,
+        "source_audio_id": audio_id,
+        "source_filename": entry.filename,
+        "source_sha256": entry.sha256,
+        "master_wav_id": master_wav_id,
+        "tuning_trace_id": trace_id,
+        "artifact_roles": artifact_roles,
         "settings": req.model_dump(),
+        "engine_render": json.loads(json.dumps(render_info, default=str)),
         "metrics_before": metrics_before.model_dump(),
-        "metrics_after": metrics_after.model_dump()
+        "metrics_after": metrics_after.model_dump(),
+        "quality_report": quality_report.model_dump(),
     }
     trace_filename = f"{trace_id}.json"
     with open(os.path.join(session_dir, trace_filename), "w", encoding="utf-8") as f:
@@ -3061,6 +3392,7 @@ def _master_internal(
         metrics_after=metrics_after,
         tuning_trace_id=trace_id,
         artifacts=[master_wav_id, metrics_before_id, metrics_after_id, trace_id],
+        quality_report=quality_report,
     )
 
 
@@ -3723,7 +4055,15 @@ def _analyze_internal(
         duration_s=round(len(y) / sr, 2),
         peak_dbfs=float(features["peak_dbfs"]),
         rms_dbfs=float(features["rms_dbfs"]),
-        centroid_hz=float(features["centroid_hz"])
+        centroid_hz=float(features["centroid_hz"]),
+        low_band_correlation=float(features.get("corr_lo", 0.0)),
+        high_band_correlation=float(features.get("corr_hi", 0.0)),
+        vocal_presence_db=float(features.get("vocal_presence_db", 0.0)),
+        low_mid_masking_db=float(features.get("low_mid_masking_db", 0.0)),
+        sub_to_kick_balance_db=float(features.get("sub_to_kick_balance_db", 0.0)),
+        harshness_index_db=float(features.get("harshness_index_db", 0.0)),
+        spectral_tilt_db=float(features.get("spectral_tilt_db", 0.0)),
+        lra_proxy_db=float(features.get("lra_proxy_db", 0.0)),
     )
 
 
@@ -3850,6 +4190,7 @@ def run_master_job(req: MasterRequest, ctx: Context = NO_CONTEXT) -> JobLaunchOu
     )
     with _JOBS_LOCK:
         _JOBS[job_id] = job
+        _set_job_in_db(job)
     future = _JOB_EXECUTOR.submit(_run_master_job_worker, job_id)
     _update_job(job_id, future=future)
 
@@ -3907,9 +4248,12 @@ def job_result(
     return JobResultOut(
         job_id=job.job_id,
         status=job.status,
+        master_wav_id=job.result.master_wav_id,
+        tuning_trace_id=job.result.tuning_trace_id,
         artifacts=artifacts,
         metrics=job.result.metrics_after,
         precision=precision,
+        quality_report=job.result.quality_report,
     )
 
 
@@ -3944,22 +4288,23 @@ def safe_write_text(req: FileWriteIn) -> FileWriteOut:
 def cancel_job(req: CancelJobIn, ctx: Context = NO_CONTEXT) -> CancelJobOut:
     """Cancel a queued or running job."""
     session_key, _ = _get_session_info(ctx)
-    with _JOBS_LOCK:
-        job = _JOBS.get(req.job_id)
-        if job is None or job.session_key != session_key:
-            raise ValueError("not_found: Job not found.")
+    job = _get_job(req.job_id)
+    if job is None or job.session_key != session_key:
+        raise ValueError("not_found: Job not found.")
 
-        if job.status in ("done", "error", "cancelled"):
-            return CancelJobOut(job_id=req.job_id, success=False, message=f"Job already finished with status '{job.status}'.")
+    if job.status in ("done", "error", "cancelled"):
+        return CancelJobOut(job_id=req.job_id, success=False, message=f"Job already finished with status '{job.status}'.")
 
-        job.cancel_requested = True
-        if job.future and not job.future.done():
-            job.future.cancel()
-
-        job.status = "cancelled"
-        job.error = _make_error("cancelled", "Job was cancelled by user.", {"job_id": req.job_id})
-        job.finished_at = time.time()
-        _set_job_in_db(job)
+    if job.future and not job.future.done():
+        job.future.cancel()
+    _update_job(
+        req.job_id,
+        cancel_requested=True,
+        status="cancelled",
+        error=_make_error("cancelled", "Job was cancelled by user.", {"job_id": req.job_id}),
+        finished_at=time.time(),
+        progress=100,
+    )
 
     return CancelJobOut(job_id=req.job_id, success=True, message="Job cancelled.")
 
@@ -4972,6 +5317,7 @@ async def ai_stem_remix(req: AiStemRemixIn, ctx: Context) -> AiStemRemixOut:
 @mcp.custom_route("/", methods=["GET"])
 async def root_info(_request: Request) -> JSONResponse:
     """Expose a lightweight root document so HTTP deployments are self-describing."""
+    engine = _engine_health()
     return JSONResponse(
         {
             "name": SERVER_NAME,
@@ -4979,6 +5325,7 @@ async def root_info(_request: Request) -> JSONResponse:
             "transport": HTTP_APP_TRANSPORT,
             "mcp_path": _http_path(),
             "health_path": "/health",
+            "engine_ready": engine["ready"],
             "message": "AuralMind2 is running. Use the MCP endpoint at the configured mcp_path.",
         }
     )
@@ -4987,6 +5334,7 @@ async def root_info(_request: Request) -> JSONResponse:
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(_request: Request) -> JSONResponse:
     """Expose a simple health endpoint for hosts and smoke tests."""
+    engine = _engine_health()
     return JSONResponse(
         {
             "ok": True,
@@ -4994,6 +5342,7 @@ async def health_check(_request: Request) -> JSONResponse:
             "version": VERSION,
             "transport": HTTP_APP_TRANSPORT,
             "mcp_path": _http_path(),
+            "engine": engine,
         }
     )
 

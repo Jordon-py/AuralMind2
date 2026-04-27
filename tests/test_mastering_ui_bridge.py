@@ -1,7 +1,19 @@
+"""
+UI launcher and bridge tests for AuralMind2 local mastering exports.
+
+Data shapes: CLI argument lists, mocked UI session objects, and `Path` outputs
+for mastered WAV export destinations.
+Syntax: run with `python -m unittest tests.test_mastering_ui_bridge -q`.
+Important tests: `RunUiLauncherTests` around line 19 checks launcher routing,
+and `MasteringUIBridgeTests` around line 68 checks sanitized export filenames.
+Possible bugs: these tests mock UI sessions and do not launch the browser UI.
+Extend by adding a Flask route smoke test and a manifest export assertion.
+"""
+
 from __future__ import annotations
 
 import asyncio
-import tempfile
+import shutil
 import types
 import unittest
 from pathlib import Path
@@ -63,15 +75,20 @@ class RunUiLauncherTests(unittest.TestCase):
 
 class MasteringUIBridgeTests(unittest.TestCase):
     def test_build_output_path_sanitizes_song_and_preset(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bridge = MasteringUIBridge(export_root=Path(tmpdir))
+        runtime_root = Path(__file__).resolve().parent / "_runtime_ui_bridge"
+        shutil.rmtree(runtime_root, ignore_errors=True)
+        runtime_root.mkdir(parents=True, exist_ok=True)
+        try:
+            bridge = MasteringUIBridge(export_root=runtime_root)
             output_path = bridge._build_output_path(
                 song_name="Face Time / 2",
                 preset="Hi Fi / Streaming",
                 filename="master.wav",
             )
+        finally:
+            shutil.rmtree(runtime_root, ignore_errors=True)
 
-        self.assertEqual(output_path.parent, Path(tmpdir))
+        self.assertEqual(output_path.parent, runtime_root)
         self.assertTrue(output_path.name.endswith("_Master.wav"))
         self.assertIn("Face_Time", output_path.name)
         self.assertIn("Hi_Fi", output_path.name)

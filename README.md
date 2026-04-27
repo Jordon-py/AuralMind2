@@ -165,6 +165,23 @@ Local desktop MCP mode:
 python3 server.py
 ```
 
+React web workspace:
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+Open `http://127.0.0.1:5173`. For live mastering API calls, run the existing
+Flask dashboard in another terminal:
+
+```bash
+python run_ui.py --server
+```
+
+The Vite dev server proxies `/api` to `http://127.0.0.1:5000`.
+
 ## Verification
 
 Basic syntax check:
@@ -184,6 +201,16 @@ Pytest:
 
 ```bash
 python3 -m pytest -q
+```
+
+Frontend checks:
+
+```bash
+cd web
+npm run lint
+npm run build
+npx playwright install chromium
+npm run test:e2e
 ```
 
 ## Deployment
@@ -207,8 +234,22 @@ The repo includes a matching `render.yaml`.
 - HTTP port: `8080`
 - HTTP path: `/mcp`
 
+Horizon is an MCP-server deployment target, not a generic static frontend host.
+Use it for the AuralMind2 MCP server surface. Deploy the React app in `web/`
+through a frontend/static host, then set `VITE_AURALMIND_API_BASE` if the Python
+API is hosted on a different origin.
+
+### React frontend
+
+- App root: `web/`
+- Build command: `npm install && npm run build`
+- Output directory: `web/dist`
+- Local preview: `npm run preview`
+- Optional live API env: `VITE_AURALMIND_API_BASE=https://<api-host>`
+
 ## Notes
 
 - `server.py` is the authoritative MCP server contract.
 - `tools/auralmind_maestro.py` is the authoritative mastering engine.
+- `web/` is the deployable React workspace for the premium browser UI.
 - The top-level legacy maestro script remains only for compatibility and should not diverge from the tool package.

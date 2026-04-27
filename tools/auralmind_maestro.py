@@ -26,6 +26,29 @@ What's new vs earlier generations
    - Batched vectorized FFT magnitude analysis (fewer Python loops).
    - Cached DSP coefficients + LUFS baseline reuse inside governor search.
 
+Data shapes
+-----------
+Audio is processed as float32 stereo arrays shaped `(samples, 2)`. Public
+settings live in the `Preset` dataclass around line 2430, and render telemetry
+is returned as JSON-serializable dictionaries.
+
+Important functions
+-------------------
+`analyze_track_features` starts around line 300, `mono_sub_v2` around line 2210,
+and `master` around line 2830. These are the key integration points used by the
+FastMCP server.
+
+Known risks
+-----------
+Approximate LUFS and band heuristics are stable enough for planning, but final
+release decisions should still be checked with a dedicated loudness meter and
+human audition. Demucs remains optional and can be slow or unavailable.
+
+Extension ideas
+---------------
+Add a tiny fixture-based DSP regression suite for phase/mono behavior, and add
+an optional external BS.1770 verifier for final delivery exports.
+
 Quick CLI Example
 -----------------
 python tools/auralmind_maestro.py --target input.wav --out mastered.wav --preset hi_fi_streaming
@@ -304,14 +327,13 @@ def analyze_track_features(y: np.ndarray, sr: int) -> Dict[str, float]:
     tp_db = float(lin_to_db(true_peak_estimate(y, sr, oversample=4) + 1e-12))
 
     peak_db = float(lin_to_db(np.max(np.abs(y)) + 1e-12))
-    rms = np.sqrt(np.mean(y.astype(np.float64) ** 2))
-    rms_db = float(lin_to_db(float(rms) + 1e-12))
+    rms_value = np.sqrt(np.mean(y.astype(np.float64) ** 2))
+    rms_db = float(lin_to_db(float(rms_value) + 1e-12))
     crest_db = float(peak_db - rms_db)
 
     corr_hi = float(corrcoef_band(y, sr, 2000.0, 12000.0))
     corr_lo = float(corrcoef_band(y, sr, 20.0, 200.0))
 
-    # Simple spectral centroid (Hz) for tone brightness proxy
     mono = np.mean(y, axis=1).astype(np.float32)
     n = min(len(mono), sr * 8)  # cap work
     if n < 2048:
@@ -322,6 +344,37 @@ def analyze_track_features(y: np.ndarray, sr: int) -> Dict[str, float]:
         freqs = np.fft.rfftfreq(n, d=1.0 / sr)
         centroid = float((freqs @ mag) / (np.sum(mag) + 1e-12))
 
+    def band_rms_db(lo_hz: float, hi_hz: float) -> float:
+        nyq = 0.5 * float(sr)
+        lo = max(20.0, min(float(lo_hz), nyq * 0.95))
+        hi = max(lo + 10.0, min(float(hi_hz), nyq * 0.98))
+        if hi <= lo:
+            return -120.0
+        b, a = butter_bandpass(lo, hi, sr, order=2)
+        band = sps.lfilter(b, a, mono).astype(np.float32)
+        return float(lin_to_db(rms(band) + 1e-12))
+
+    sub_db = band_rms_db(35.0, 80.0)
+    kick_db = band_rms_db(80.0, 160.0)
+    low_mid_db = band_rms_db(200.0, 420.0)
+    presence_db = band_rms_db(1800.0, 5000.0)
+    harsh_db = band_rms_db(5500.0, 9000.0)
+    air_db = band_rms_db(9000.0, min(14000.0, sr * 0.45))
+
+    lra_proxy_db = 0.0
+    if len(mono) >= max(2048, sr):
+        win = max(2048, int(sr * 1.5))
+        hop = max(512, win // 2)
+        block_levels: list[float] = []
+        for start in range(0, max(1, len(mono) - win + 1), hop):
+            block = mono[start:start + win]
+            if len(block) < win:
+                break
+            block_levels.append(float(lin_to_db(rms(block) + 1e-12)))
+        if len(block_levels) >= 2:
+            levels = np.asarray(block_levels, dtype=np.float32)
+            lra_proxy_db = float(np.percentile(levels, 95) - np.percentile(levels, 10))
+
     return {
         "lufs": lufs,
         "tp_dbfs": tp_db,
@@ -331,6 +384,18 @@ def analyze_track_features(y: np.ndarray, sr: int) -> Dict[str, float]:
         "corr_hi": corr_hi,
         "corr_lo": corr_lo,
         "centroid_hz": float(centroid),
+        "sub_band_db": sub_db,
+        "kick_band_db": kick_db,
+        "low_mid_db": low_mid_db,
+        "presence_db": presence_db,
+        "harshness_band_db": harsh_db,
+        "air_band_db": air_db,
+        "vocal_presence_db": float(presence_db - low_mid_db),
+        "low_mid_masking_db": float(low_mid_db - presence_db),
+        "sub_to_kick_balance_db": float(sub_db - kick_db),
+        "harshness_index_db": float(harsh_db - presence_db),
+        "spectral_tilt_db": float(air_db - low_mid_db),
+        "lra_proxy_db": float(lra_proxy_db),
     }
 
 
@@ -2215,8 +2280,10 @@ def mono_sub_v2(y: np.ndarray, sr: int,
     b_hp, a_hp = butter_highpass(cutoff, sr, order=2)
     side_hp = sps.lfilter(b_hp, a_hp, side).astype(np.float32)
 
-    # blend: keep some original side for vibe but protect sub
-    side_out = side_hp * (1.0 - mono_mix) + side * mono_mix
+    # blend: higher mono_mix means more high-passed side and therefore a more
+    # centered low band. Keep some original side for vibe, but do not let
+    # unstable 808 information survive as stereo side energy.
+    side_out = side * (1.0 - mono_mix) + side_hp * mono_mix
     return mid_side_decode(mid, side_out), cutoff, mono_mix
 
 

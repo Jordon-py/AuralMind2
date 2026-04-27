@@ -1,0 +1,27 @@
+/**
+ * Purpose: Vite entry stylesheet kept intentionally tiny; the product design
+ * system lives in src/styles/theme.css and src/styles/app.css.
+ * Data shapes: global browser reset selectors only.
+ * Syntax: imported once by src/main.tsx.
+ * Important functions: none; CSS reset only.
+ * Possible bugs: adding product tokens here can split the design system.
+ * Enhance next: move to a CSS layer if the app adopts Tailwind/shadcn later.
+ */
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-inline-size: 320px;
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+}
+
+button,
+input {
+  font: inherit;
+}

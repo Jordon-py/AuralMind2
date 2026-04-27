@@ -24,6 +24,8 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .pyright/
+.test_tmp*/
+tests/_runtime_*/
 
 # Generated audio and DAW sidecars
 *.wav

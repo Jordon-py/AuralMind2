@@ -1,8 +1,21 @@
+"""
+Semantic planning, async job, and premium QC tests for AuralMind2.
+
+Data shapes: fake Maestro presets, `AudioMetrics`, `MasterRequest`, job state,
+artifact summaries, and quality reports.
+Syntax: run with `python -m pytest tests/test_semantic_planning.py`.
+Important tests: `SemanticPlanningTests` around line 160 covers intent planning,
+job lifecycle, AI-assisted tools, validation, and stale persisted jobs.
+Possible bugs: the fake DSP does not exercise full loudness rendering. Extend by
+adding golden short-audio fixtures and trace JSON schema snapshots.
+"""
+
 import asyncio
 import math
 import os
-import tempfile
+import shutil
 import unittest
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict
 from unittest import mock
@@ -10,6 +23,7 @@ from unittest import mock
 import numpy as np
 
 import server
+from pydantic import ValidationError
 
 
 @dataclass
@@ -108,9 +122,16 @@ class FakeMaestro:
             "tp_dbfs": -1.1,
             "crest_db": 10.0,
             "corr_hi": 0.3,
+            "corr_lo": 0.94,
             "peak_dbfs": -0.4,
             "rms_dbfs": -10.4,
             "centroid_hz": 3100.0,
+            "vocal_presence_db": -1.5,
+            "low_mid_masking_db": 1.5,
+            "sub_to_kick_balance_db": 2.0,
+            "harshness_index_db": 0.6,
+            "spectral_tilt_db": -4.0,
+            "lra_proxy_db": 5.2,
         }
 
     def ensure_stereo(self, audio: np.ndarray) -> np.ndarray:
@@ -145,22 +166,27 @@ class FakeMaestro:
 
 class SemanticPlanningTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.tempdir = tempfile.TemporaryDirectory()
+        self.tempdir_path = os.path.join(os.getcwd(), "tests", "_runtime_semantic", uuid.uuid4().hex)
+        os.makedirs(self.tempdir_path, exist_ok=True)
         self.ctx = FakeContext()
         self.fake_maestro = FakeMaestro()
-        self.storage_patch = mock.patch.object(server, "STORAGE_DIR", self.tempdir.name)
+        self.storage_patch = mock.patch.object(server, "STORAGE_DIR", self.tempdir_path)
+        self.db_patch = mock.patch.object(server, "MAESTRO_DB_PATH", os.path.join(self.tempdir_path, "maestro_state.db"))
         self.storage_patch.start()
+        self.db_patch.start()
         os.makedirs(server.STORAGE_DIR, exist_ok=True)
+        server._init_db()
         server._ARTIFACTS.clear()
         server._JOBS.clear()
         server.INTERACTIVE_SESSIONS.clear()
 
     def tearDown(self) -> None:
         self.storage_patch.stop()
+        self.db_patch.stop()
         server._ARTIFACTS.clear()
         server._JOBS.clear()
         server.INTERACTIVE_SESSIONS.clear()
-        self.tempdir.cleanup()
+        shutil.rmtree(self.tempdir_path, ignore_errors=True)
 
     def _register_test_audio(self) -> str:
         session_key, session_dir = server._get_session_info(self.ctx)
@@ -189,6 +215,8 @@ class SemanticPlanningTests(unittest.TestCase):
             peak_dbfs=-0.4,
             rms_dbfs=-11.0,
             centroid_hz=3300.0,
+            low_band_correlation=0.88,
+            high_band_correlation=0.18,
         )
         with mock.patch.object(server, "_get_maestro", return_value=(self.fake_maestro, None)):
             with mock.patch.object(server, "_analyze_internal", return_value=metrics):
@@ -214,6 +242,53 @@ class SemanticPlanningTests(unittest.TestCase):
         self.assertNotEqual(cinematic.settings.target_lufs, club.settings.target_lufs)
         self.assertNotEqual(cinematic.settings.control_profile, club.settings.control_profile)
 
+    def test_plan_mastering_strategy_uses_premium_material_metrics(self) -> None:
+        metrics = server.AudioMetrics(
+            integrated_lufs=-14.4,
+            true_peak_dbtp=-1.4,
+            crest_db=10.0,
+            stereo_correlation=0.8,
+            duration_s=142.0,
+            peak_dbfs=-0.5,
+            rms_dbfs=-11.2,
+            centroid_hz=4300.0,
+            low_band_correlation=0.52,
+            high_band_correlation=0.22,
+            vocal_presence_db=-6.2,
+            low_mid_masking_db=7.1,
+            sub_to_kick_balance_db=8.4,
+            harshness_index_db=2.9,
+            spectral_tilt_db=-5.6,
+            lra_proxy_db=4.0,
+        )
+        with mock.patch.object(server, "_get_maestro", return_value=(self.fake_maestro, None)):
+            with mock.patch.object(server, "_analyze_internal", return_value=metrics):
+                plan = server.plan_mastering_strategy(
+                    server.StrategyPlanIn(
+                        audio_id="aud_1234567890ab",
+                        goal="Melodic trap vocal master with clear hook and controlled 808",
+                        platform="spotify",
+                    ),
+                    self.ctx,
+                )
+
+        self.assertEqual(plan.chosen_preset, "radio_loud")
+        self.assertIsNotNone(plan.settings.control_profile)
+        self.assertLessEqual(plan.settings.control_profile.spatial_width, 0.1)
+        self.assertLessEqual(plan.settings.control_profile.low_end_focus, 0.35)
+        self.assertTrue(any("Low-band correlation" in warning for warning in plan.warnings))
+        self.assertTrue(any("Low-mid masking" in warning for warning in plan.warnings))
+
+    def test_analyze_audio_surfaces_premium_material_metrics(self) -> None:
+        audio_id = self._register_test_audio()
+        with mock.patch.object(server, "_get_maestro", return_value=(self.fake_maestro, None)):
+            result = server.analyze_audio(server.AnalyzeIn(audio_id=audio_id), self.ctx)
+
+        self.assertEqual(result.metrics.low_band_correlation, 0.94)
+        self.assertEqual(result.metrics.high_band_correlation, 0.3)
+        self.assertEqual(result.metrics.vocal_presence_db, -1.5)
+        self.assertEqual(result.metrics.sub_to_kick_balance_db, 2.0)
+
     def test_run_master_job_and_worker_preserve_control_profile_and_safe_overrides(self) -> None:
         audio_id = self._register_test_audio()
         before_metrics = server.AudioMetrics(
@@ -225,6 +300,12 @@ class SemanticPlanningTests(unittest.TestCase):
             peak_dbfs=-0.5,
             rms_dbfs=-11.3,
             centroid_hz=3000.0,
+            low_band_correlation=0.93,
+            high_band_correlation=0.24,
+            vocal_presence_db=-1.8,
+            low_mid_masking_db=1.8,
+            sub_to_kick_balance_db=3.0,
+            harshness_index_db=0.9,
         )
         after_metrics = before_metrics.model_copy(update={"integrated_lufs": -12.3, "crest_db": 9.4})
 
@@ -257,12 +338,23 @@ class SemanticPlanningTests(unittest.TestCase):
                 server._run_master_job_worker(launch.job_id)
                 completed = server._get_job(launch.job_id)
 
+        self.assertIsNotNone(completed)
         self.assertEqual(completed.status, "done")
         rendered = self.fake_maestro.rendered_presets[-1]
         self.assertEqual(rendered.governor_search_steps, 4)
         self.assertEqual(rendered.governor_gr_limit_db, -2.1)
         self.assertEqual(rendered.stem_gains_db, {"vocals": 1.0})
         self.assertGreater(rendered.width_hi, self.fake_maestro.get_presets()["hi_fi_streaming"].width_hi)
+        self.assertGreater(rendered.mono_sub_base_mix, self.fake_maestro.get_presets()["hi_fi_streaming"].mono_sub_base_mix)
+
+        result = server.job_result(server.JobIdIn(job_id=launch.job_id), self.ctx)
+        artifact_kinds = {artifact.kind for artifact in result.artifacts}
+        self.assertEqual(result.master_wav_id, completed.result.master_wav_id)
+        self.assertEqual(result.tuning_trace_id, completed.result.tuning_trace_id)
+        self.assertIn("mastered_audio", artifact_kinds)
+        self.assertIn("trace", artifact_kinds)
+        self.assertIsNotNone(result.quality_report)
+        self.assertIn(result.quality_report.verdict, {"premium_ready", "premium_with_cautions", "review_recommended"})
 
     def test_repaired_ai_tools_return_session_scoped_artifacts(self) -> None:
         audio_id = self._register_test_audio()
@@ -317,6 +409,40 @@ class SemanticPlanningTests(unittest.TestCase):
         with mock.patch.object(server, "_get_maestro", return_value=(self.fake_maestro, None)):
             with mock.patch.object(server, "_analyze_internal", side_effect=analyze_side_effect):
                 asyncio.run(run_tools())
+
+    def test_master_settings_validation_rejects_unsafe_values(self) -> None:
+        with self.assertRaises(ValidationError):
+            server.MasterSettings(target_lufs=-5.0)
+        with self.assertRaises(ValidationError):
+            server.MasterSettings(stem_gains_db={"vocals": 10.0})
+        with self.assertRaises(ValueError):
+            server._as_bit_depth("24bit")
+        with self.assertRaises(ValueError):
+            server._as_stem_mode("maybe")
+
+    def test_persisted_running_job_is_recovered_as_stale(self) -> None:
+        session_key, session_dir = server._get_session_info(self.ctx)
+        job = server.JobState(
+            job_id="job_1234567890ab",
+            audio_id="aud_1234567890ab",
+            status="running",
+            progress=45,
+            settings=server.MasterSettings(),
+            session_key=session_key,
+            session_dir=session_dir,
+        )
+        server._set_job_in_db(job)
+        server._JOBS.clear()
+
+        recovered = server._get_job(job.job_id)
+        persisted = server._get_job_from_db(job.job_id)
+
+        self.assertIsNotNone(recovered)
+        self.assertEqual(recovered.status, "error")
+        self.assertEqual(recovered.error.code, "stale_job_recovered")
+        self.assertEqual(recovered.error.details["previous_status"], "running")
+        self.assertIsNotNone(persisted)
+        self.assertEqual(persisted.status, "error")
 
 
 if __name__ == "__main__":
