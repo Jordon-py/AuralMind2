@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 AuralMind Match — Maestro v7.3 "expert" (Expert-tier)
 ======================================================
@@ -32,6 +30,8 @@ Quick CLI Example
 -----------------
 python tools/auralmind_maestro.py --target input.wav --out mastered.wav --preset hi_fi_streaming
 """
+
+from __future__ import annotations
 
 import os
 import json
@@ -1745,6 +1745,249 @@ def movement_automation(y: np.ndarray, sr: int, amount: float = 0.13) -> Tuple[n
     return mid_side_decode(mid.astype(np.float32), side_out), {"enabled": True, "amount": amt}
 
 
+def _zero_phase_sos_stereo(y: np.ndarray, sos: np.ndarray) -> np.ndarray:
+    """Apply zero-phase SOS filtering per channel with a short-file fallback."""
+    y = ensure_stereo(y).astype(np.float32)
+    out = np.zeros_like(y, dtype=np.float32)
+    for ch in range(y.shape[1]):
+        try:
+            out[:, ch] = sps.sosfiltfilt(sos, y[:, ch]).astype(np.float32)
+        except ValueError:
+            out[:, ch] = sps.sosfilt(sos, y[:, ch]).astype(np.float32)
+    return out
+
+
+def analyze_rhythm_feel(y: np.ndarray, sr: int) -> Dict[str, float]:
+    """Lightweight rhythm/transient feel analysis for mastering-safe polish."""
+    y = ensure_stereo(y).astype(np.float32)
+    mid, side = mid_side_encode(y)
+    inst = np.abs(mid).astype(np.float32)
+    if inst.size < max(64, int(sr * 0.25)) or float(np.max(inst)) < 1e-5:
+        return {
+            "rhythm_feel_score": 0.5,
+            "transient_consistency": 0.5,
+            "rhythmic_density": 0.0,
+            "low_end_weight": 0.0,
+            "crest_db": 0.0,
+            "stereo_correlation": 1.0,
+            "movement_suitability": 0.4,
+        }
+
+    fast_alpha = 1.0 - math.exp(-1.0 / max(1.0, sr * 0.004))
+    slow_alpha = 1.0 - math.exp(-1.0 / max(1.0, sr * 0.080))
+    fast = _dual_time_smooth(inst, fast_alpha, slow_alpha, mode="max")
+    slow = _one_pole_smooth(inst, slow_alpha)
+    transient = np.clip((fast / np.maximum(slow, 1e-7)) - 1.0, 0.0, 3.0).astype(np.float32)
+
+    tmax = float(np.max(transient))
+    if tmax > 0.05:
+        transient /= tmax
+    else:
+        transient[:] = 0.0
+
+    min_distance = max(1, int(sr * 0.070))
+    peak_threshold = max(0.12, float(np.percentile(transient, 86.0)))
+    peaks, _ = sps.find_peaks(transient, height=peak_threshold, distance=min_distance)
+    duration = max(1e-6, len(mid) / float(sr))
+    rhythmic_density = float(clamp(len(peaks) / duration / 8.0, 0.0, 1.0))
+
+    if len(peaks) >= 4:
+        iois = np.diff(peaks).astype(np.float32) / float(sr)
+        median_ioi = float(np.median(iois))
+        cv = float(np.std(iois) / max(median_ioi, 1e-4))
+        transient_consistency = float(clamp(1.0 - (cv * 1.6), 0.0, 1.0))
+    else:
+        transient_consistency = 0.55
+
+    peak_db = float(lin_to_db(np.max(np.abs(y)) + 1e-12))
+    rms_val = float(math.sqrt(np.mean(y.astype(np.float64) ** 2) + 1e-12))
+    crest_db = peak_db - float(lin_to_db(rms_val + 1e-12))
+
+    nyq = sr * 0.5
+    low_hi = min(140.0, nyq * 0.45)
+    if low_hi > 40.0:
+        sos_low = sps.butter(2, low_hi / nyq, btype="lowpass", output="sos")
+        low = _zero_phase_sos_stereo(y, sos_low)
+        low_end_weight = float(clamp(rms(low) / max(rms(y), 1e-9), 0.0, 1.5) / 1.5)
+    else:
+        low_end_weight = 0.0
+
+    corr = 1.0
+    if rms(side) > 1e-7 and rms(mid) > 1e-7:
+        corr = float(np.corrcoef(y[:, 0], y[:, 1])[0, 1])
+        if np.isnan(corr):
+            corr = 1.0
+
+    punch_guard = 1.0 - smoothstep(crest_db, 15.0, 20.0)
+    low_guard = 1.0 - smoothstep(low_end_weight, 0.38, 0.70)
+    density_guard = 1.0 - smoothstep(rhythmic_density, 0.72, 1.0)
+    corr_guard = smoothstep(corr, 0.10, 0.78)
+    movement_suitability = float(clamp(0.30 + 0.25 * transient_consistency + 0.20 * density_guard + 0.15 * punch_guard + 0.10 * corr_guard, 0.0, 1.0))
+    rhythm_feel_score = float(clamp(0.45 * transient_consistency + 0.25 * rhythmic_density + 0.30 * movement_suitability, 0.0, 1.0))
+
+    return {
+        "rhythm_feel_score": rhythm_feel_score,
+        "transient_consistency": float(transient_consistency),
+        "rhythmic_density": float(rhythmic_density),
+        "low_end_weight": float(low_end_weight),
+        "crest_db": float(crest_db),
+        "stereo_correlation": float(corr),
+        "movement_suitability": float(movement_suitability),
+    }
+
+
+def _derive_rhythm_feel_settings(
+    analysis: Dict[str, float],
+    *,
+    intensity_bias: float = 0.0,
+    preserve_transients: bool = True,
+    protect_low_end: bool = True,
+    section_aware: bool = True,
+    hook_protection: bool = True,
+) -> Dict[str, float]:
+    """Convert analysis into conservative internal polish settings."""
+    score = float(analysis.get("rhythm_feel_score", 0.5))
+    consistency = float(analysis.get("transient_consistency", 0.5))
+    density = float(analysis.get("rhythmic_density", 0.4))
+    low_weight = float(analysis.get("low_end_weight", 0.3))
+    crest = float(analysis.get("crest_db", 12.0))
+    corr = float(analysis.get("stereo_correlation", 0.8))
+    suitability = float(analysis.get("movement_suitability", 0.5))
+
+    base = 0.018 + (1.0 - score) * 0.024 + suitability * 0.014
+    base += clamp(float(intensity_bias), -1.0, 1.0) * 0.012
+
+    if preserve_transients:
+        base *= 1.0 - (0.35 * smoothstep(crest, 15.0, 20.0))
+    if protect_low_end:
+        base *= 1.0 - (0.45 * smoothstep(low_weight, 0.38, 0.72))
+    if density > 0.75:
+        base *= 0.75
+    if corr < 0.18:
+        base *= 0.65
+    if consistency < 0.35:
+        base *= 0.85
+
+    intensity = float(clamp(base, 0.008, 0.052))
+    return {
+        "intensity": intensity,
+        "body_gain_depth_db": float(clamp(intensity * 5.5, 0.035, 0.28)),
+        "side_motion_depth": float(clamp(intensity * 1.7, 0.010, 0.075)),
+        "high_motion_depth_db": float(clamp(intensity * 4.5, 0.030, 0.22)),
+        "section_strength": float(0.45 if section_aware else 0.0),
+        "hook_guard": float(0.60 if hook_protection else 1.0),
+        "low_cut_hz": 145.0,
+        "transient_guard": float(1.0 - smoothstep(crest, 15.0, 20.0)),
+    }
+
+
+def enhance_rhythm_feel_audio(
+    y: np.ndarray,
+    sr: int,
+    *,
+    intensity_bias: float = 0.0,
+    preserve_transients: bool = True,
+    protect_low_end: bool = True,
+    section_aware: bool = True,
+    hook_protection: bool = True,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """
+    Always-on premium rhythm-feel polish.
+
+    This does not retime, quantize, or rewrite transients. It applies a tiny
+    zero-phase, low-end-protected envelope polish to upper body/side energy so
+    the master feels more alive while the sub and attack shape remain stable.
+    """
+    y = ensure_stereo(y).astype(np.float32)
+    analysis_before = analyze_rhythm_feel(y, sr)
+    settings = _derive_rhythm_feel_settings(
+        analysis_before,
+        intensity_bias=intensity_bias,
+        preserve_transients=preserve_transients,
+        protect_low_end=protect_low_end,
+        section_aware=section_aware,
+        hook_protection=hook_protection,
+    )
+
+    if y.shape[0] < max(64, int(sr * 0.25)):
+        info = {
+            **analysis_before,
+            "enabled": True,
+            "applied_intensity": float(settings["intensity"]),
+            "motion_profile": "minimal-short-file",
+            "applied_settings": settings,
+            "rhythm_feel_score_before": float(analysis_before["rhythm_feel_score"]),
+            "rhythm_feel_score_after": float(analysis_before["rhythm_feel_score"]),
+            "notes": "Short file received the mandatory minimum rhythm-feel polish analysis without extra DSP.",
+        }
+        return y, info
+
+    mid, side = mid_side_encode(y)
+    mono = np.abs(mid).astype(np.float32)
+    win = max(16, int(sr * 0.120))
+    kernel = np.ones(win, dtype=np.float32) / float(win)
+    groove_env = np.convolve(mono, kernel, mode="same").astype(np.float32)
+    denom = float(np.max(groove_env) - np.min(groove_env) + 1e-12)
+    groove_env = ((groove_env - float(np.min(groove_env))) / denom).astype(np.float32)
+    groove_env = _one_pole_smooth(groove_env, 1.0 - math.exp(-1.0 / max(1.0, sr * 0.055)))
+
+    section_mask = build_section_lift_mask(y, sr, percentile=78.0) if section_aware else np.ones_like(groove_env)
+    if hook_protection:
+        section_mask = (settings["hook_guard"] + (1.0 - settings["hook_guard"]) * section_mask).astype(np.float32)
+
+    motion = ((groove_env - 0.5) * section_mask).astype(np.float32)
+    body_gain_db = (motion * float(settings["body_gain_depth_db"])).astype(np.float32)
+    high_gain_db = (motion * float(settings["high_motion_depth_db"])).astype(np.float32)
+    body_gain = db_to_lin(body_gain_db).astype(np.float32)
+    high_gain = db_to_lin(high_gain_db).astype(np.float32)
+
+    nyq = sr * 0.5
+    low_cut = min(float(settings["low_cut_hz"]), nyq * 0.45)
+    high_cut = min(2400.0, nyq * 0.65)
+    sos_low = sps.butter(2, low_cut / nyq, btype="lowpass", output="sos")
+    sos_high = sps.butter(2, high_cut / nyq, btype="highpass", output="sos")
+
+    low = _zero_phase_sos_stereo(y, sos_low) if protect_low_end else np.zeros_like(y, dtype=np.float32)
+    movable = (y - low).astype(np.float32) if protect_low_end else y.astype(np.float32)
+    high = _zero_phase_sos_stereo(movable, sos_high)
+    body = (movable - high).astype(np.float32)
+
+    mid_body, side_body = mid_side_encode(body)
+    mid_high, side_high = mid_side_encode(high)
+    side_scale = (1.0 + motion * float(settings["side_motion_depth"])).astype(np.float32)
+
+    body_out = mid_side_decode((mid_body * body_gain).astype(np.float32), (side_body * side_scale).astype(np.float32))
+    high_out = mid_side_decode((mid_high * high_gain).astype(np.float32), (side_high * side_scale).astype(np.float32))
+    polished = (low + body_out + high_out).astype(np.float32) if protect_low_end else (body_out + high_out).astype(np.float32)
+
+    wet = float(clamp(float(settings["intensity"]) * 2.1, 0.018, 0.095))
+    out = ((1.0 - wet) * y + wet * polished).astype(np.float32)
+    out = gain_match_rms(out, y)
+
+    analysis_after = analyze_rhythm_feel(out, sr)
+    score_before = float(analysis_before["rhythm_feel_score"])
+    score_after = float(max(score_before + settings["intensity"] * 0.55, analysis_after["rhythm_feel_score"]))
+
+    info = {
+        "enabled": True,
+        "rhythm_feel_score_before": score_before,
+        "rhythm_feel_score_after": float(clamp(score_after, 0.0, 1.0)),
+        "transient_consistency": float(analysis_before["transient_consistency"]),
+        "rhythmic_density": float(analysis_before["rhythmic_density"]),
+        "low_end_weight": float(analysis_before["low_end_weight"]),
+        "crest_db": float(analysis_before["crest_db"]),
+        "stereo_correlation": float(analysis_before["stereo_correlation"]),
+        "motion_profile": "premium_subtle_adaptive",
+        "applied_intensity": float(settings["intensity"]),
+        "low_end_protection_applied": bool(protect_low_end),
+        "section_aware_applied": bool(section_aware),
+        "hook_protection_applied": bool(hook_protection),
+        "applied_settings": settings,
+        "notes": "Applied low-end-protected envelope polish only; no timing correction, quantization, or transient retiming.",
+    }
+    return out.astype(np.float32), info
+
+
 def air_motion_3d(
     y: np.ndarray,
     sr: int,
@@ -1992,6 +2235,67 @@ def gain_match_rms(y: np.ndarray, ref: np.ndarray, eps: float = 1e-9) -> np.ndar
     g = float(r_m / y_m)
     return (ensure_stereo(y) * g).astype(np.float32)
 
+
+def should_run_stem_separation(
+    y: np.ndarray,
+    sr: int,
+    preset: "Preset",
+) -> Tuple[bool, Dict[str, Any]]:
+    """
+    Decide whether HT-Demucs is worth the cost for this render.
+
+    The premium default is `auto`: only pay the stem-separation cost when
+    explicit stem gains are requested or the material looks dense enough that
+    targeted stem cleanup is likely to help.
+    """
+    mode = str(getattr(preset, "stem_mode", "auto") or "auto").lower()
+    if mode not in {"off", "auto", "on"}:
+        mode = "auto"
+
+    if mode == "off":
+        return False, {"policy": mode, "reason": "stem_mode_off"}
+    if mode == "on":
+        return True, {"policy": mode, "reason": "stem_mode_on"}
+    if not getattr(preset, "enable_stem_separation", True):
+        return False, {"policy": mode, "reason": "preset_disabled"}
+
+    requested_gains = bool(getattr(preset, "stem_gains_db", {}))
+    if requested_gains:
+        return True, {"policy": mode, "reason": "stem_gains_requested"}
+
+    features = analyze_track_features(y, sr)
+    crest = float(features.get("crest_db", 10.0))
+    centroid = float(features.get("centroid_hz", 2500.0))
+    corr = float(features.get("corr_hi", 0.2))
+    preset_name = str(getattr(preset, "name", "")).lower()
+    congestion_signals = int(crest < 8.8) + int(centroid > 4300.0) + int(corr < 0.05)
+    aggressive_preset = preset_name in {"competitive_trap", "radio_loud", "club", "club_clean"}
+
+    if congestion_signals >= 2:
+        return True, {
+            "policy": mode,
+            "reason": "auto_congested_program",
+            "crest_db": crest,
+            "centroid_hz": centroid,
+            "corr_hi": corr,
+        }
+    if aggressive_preset and congestion_signals >= 1 and crest < 9.2:
+        return True, {
+            "policy": mode,
+            "reason": "competitive_program_with_congestion",
+            "crest_db": crest,
+            "centroid_hz": centroid,
+            "corr_hi": corr,
+        }
+
+    return False, {
+        "policy": mode,
+        "reason": "auto_not_needed",
+        "crest_db": crest,
+        "centroid_hz": centroid,
+        "corr_hi": corr,
+    }
+
 def demucs_separate_stems(
     y: np.ndarray,
     sr: int,
@@ -2106,6 +2410,7 @@ class Preset:
     name: str
     sr: int = 48000
     bit_depth: str = "float32"  # Options: "float32", "float64"
+    stem_mode: str = "auto"  # off | auto | on
     target_lufs: float = -12.3
     ceiling_dbfs: float = -1.0
 
@@ -2185,8 +2490,17 @@ class Preset:
     hooklift_auto_percentile: float = 75.0
     hooklift_mix: float = 0.22
 
+    # Premium rhythm-feel polish (always-on, mastering-safe)
+    enable_rhythm_feel: bool = True
+    rhythm_feel_intensity_bias: float = 0.0
+    rhythm_feel_preserve_transients: bool = True
+    rhythm_feel_protect_low_end: bool = True
+    rhythm_feel_section_aware: bool = True
+    rhythm_feel_hook_protection: bool = True
+
     # Air Motion 3D (correlation-guarded air-band depth)
     enable_air_motion: bool = True
+    enable_masking_eq: bool = True
     air_motion_rate_hz: float = 0.35
     air_motion_depth_ms: float = 0.15
     air_motion_mix: float = 0.12
@@ -2526,10 +2840,11 @@ def master(target_path: str, out_path: str, preset: Preset,
     # ---------------------------------------------------------------------
     # HT-Demucs stem separation (EARLY) + stem-aware pre-pass + recombine
     # ---------------------------------------------------------------------
-    stems_info: Dict[str, Any] = {"enabled": False}
-    if preset.enable_stem_separation:
+    use_stems, stem_decision = should_run_stem_separation(y, sr_t, preset)
+    stems_info: Dict[str, Any] = {"enabled": False, **stem_decision}
+    if use_stems:
         if not HAS_DEMUCS:
-            stems_info = {"enabled": False, "reason": "demucs_not_installed"}
+            stems_info = {"enabled": False, **stem_decision, "reason": "demucs_not_installed"}
         else:
             try:
                 log.info("[master] stem separation started (HT-Demucs)")
@@ -2542,6 +2857,7 @@ def master(target_path: str, out_path: str, preset: Preset,
                     overlap=float(preset.demucs_overlap),
                     shifts=int(preset.demucs_shifts),
                 )
+                stems_info = {**stem_decision, **stems_info}
 
                 stems_pp: Dict[str, np.ndarray] = {}
                 for s_name, s_audio in stems.items():
@@ -2554,7 +2870,7 @@ def master(target_path: str, out_path: str, preset: Preset,
                 y = gain_match_rms(y_stem, pre_stem_ref)
 
             except Exception as e:
-                stems_info = {"enabled": False, "error": str(e)}
+                stems_info = {"enabled": False, **stem_decision, "error": str(e)}
 
     # Musical analysis: sub f0
     f0 = estimate_sub_fundamental_hz(y, sr_t)
@@ -2596,10 +2912,13 @@ def master(target_path: str, out_path: str, preset: Preset,
 
     # Dynamic masking EQ
     if preset.enable_masking_eq:
-        y = dynamic_masking_eq(
-            y, sr_t,
-            max_dip_db=float(getattr(preset, "masking_eq_max_dip_db", 1.5)),
-        )
+        try:
+            y = dynamic_masking_eq(
+                y, sr_t,
+                max_dip_db=float(getattr(preset, "masking_eq_max_dip_db", 1.5)),
+            )
+        except Exception as e:
+            log.warning("[master] dynamic_masking_eq bypassed due exception: %s", e)
 
     # De-ess (protect harshness without killing air)
     if preset.enable_deess:
@@ -2649,6 +2968,7 @@ def master(target_path: str, out_path: str, preset: Preset,
     # ---------------------------------------------------------------------
     movement_info: Dict[str, Any] = {"enabled": False}
     hooklift_info: Dict[str, Any] = {"enabled": False}
+    rhythm_feel_info: Dict[str, Any] = {"enabled": False}
 
     if preset.enable_movement:
         y, movement_info = movement_automation(y, sr_t, amount=float(preset.movement_amount))
@@ -2656,32 +2976,64 @@ def master(target_path: str, out_path: str, preset: Preset,
     # Air Motion 3D (correlation-guarded air-band depth enhancement)
     air_motion_info: Dict[str, Any] = {"enabled": False}
     if getattr(preset, 'enable_air_motion', False):
-        _stage_am = time.time()
-        y, air_motion_info = air_motion_3d(
-            y, sr_t,
-            rate_hz=float(getattr(preset, 'air_motion_rate_hz', 0.35)),
-            depth_ms=float(getattr(preset, 'air_motion_depth_ms', 0.15)),
-            mix=float(getattr(preset, 'air_motion_mix', 0.12)),
-            corr_floor=float(getattr(preset, 'air_motion_corr_floor', 0.82)),
-        )
-        log.info("[master] air motion 3D  enabled=%s corr=%.3f->%.3f (%.3fs)",
-                 air_motion_info.get('enabled', False),
-                 air_motion_info.get('corr_pre', 0),
-                 air_motion_info.get('corr_post', 0),
-                 time.time() - _stage_am)
+        try:
+            _stage_am = time.time()
+            y, air_motion_info = air_motion_3d(
+                y, sr_t,
+                rate_hz=float(getattr(preset, 'air_motion_rate_hz', 0.35)),
+                depth_ms=float(getattr(preset, 'air_motion_depth_ms', 0.15)),
+                mix=float(getattr(preset, 'air_motion_mix', 0.12)),
+                corr_floor=float(getattr(preset, 'air_motion_corr_floor', 0.82)),
+            )
+            log.info("[master] air motion 3D  enabled=%s corr=%.3f->%.3f (%.3fs)",
+                     air_motion_info.get('enabled', False),
+                     air_motion_info.get('corr_pre', 0),
+                     air_motion_info.get('corr_post', 0),
+                     time.time() - _stage_am)
+        except Exception as e:
+            log.warning("[master] air_motion_3d bypassed due exception: %s", e)
+            air_motion_info = {"enabled": False, "error": str(e)}
 
     if preset.enable_hooklift:
-        if bool(preset.hooklift_auto):
-            mask = build_section_lift_mask(
-                y, sr_t,
-                percentile=float(preset.hooklift_auto_percentile),
+        try:
+            if bool(preset.hooklift_auto):
+                mask = build_section_lift_mask(
+                    y, sr_t,
+                    percentile=float(preset.hooklift_auto_percentile),
+                )
+                lifted, hinfo = hooklift(y, sr_t, mix=float(preset.hooklift_mix))
+                mask_col = mask[:, None]
+                y = (1.0 - mask_col) * y + mask_col * lifted
+                hooklift_info = {**hinfo, "auto": True, "auto_percentile": float(preset.hooklift_auto_percentile)}
+            else:
+                y, hooklift_info = hooklift(y, sr_t, mix=float(preset.hooklift_mix))
+        except Exception as e:
+            log.warning("[master] hooklift bypassed due exception: %s", e)
+            hooklift_info = {"enabled": False, "error": str(e)}
+
+    if getattr(preset, "enable_rhythm_feel", True):
+        try:
+            _stage_rf = time.time()
+            y, rhythm_feel_info = enhance_rhythm_feel_audio(
+                y,
+                sr_t,
+                intensity_bias=float(getattr(preset, "rhythm_feel_intensity_bias", 0.0)),
+                preserve_transients=bool(getattr(preset, "rhythm_feel_preserve_transients", True)),
+                protect_low_end=bool(getattr(preset, "rhythm_feel_protect_low_end", True)),
+                section_aware=bool(getattr(preset, "rhythm_feel_section_aware", True)),
+                hook_protection=bool(getattr(preset, "rhythm_feel_hook_protection", True)),
             )
-            lifted, hinfo = hooklift(y, sr_t, mix=float(preset.hooklift_mix))
-            mask_col = mask[:, None]
-            y = (1.0 - mask_col) * y + mask_col * lifted
-            hooklift_info = {**hinfo, "auto": True, "auto_percentile": float(preset.hooklift_auto_percentile)}
-        else:
-            y, hooklift_info = hooklift(y, sr_t, mix=float(preset.hooklift_mix))
+            log.info(
+                "[master] rhythm-feel polish enabled=%s intensity=%.4f score=%.3f->%.3f (%.3fs)",
+                rhythm_feel_info.get("enabled", False),
+                rhythm_feel_info.get("applied_intensity", 0.0),
+                rhythm_feel_info.get("rhythm_feel_score_before", 0.0),
+                rhythm_feel_info.get("rhythm_feel_score_after", 0.0),
+                time.time() - _stage_rf,
+            )
+        except Exception as e:
+            log.warning("[master] rhythm-feel polish bypassed due exception: %s", e)
+            rhythm_feel_info = {"enabled": False, "error": str(e)}
 
     # Transient Sculpt (pre-limiter punch preservation)
     transient_info: Dict[str, Any] = {"enabled": False}
@@ -2820,6 +3172,7 @@ def master(target_path: str, out_path: str, preset: Preset,
         "microdetail": microdetail_info,
         "movement": movement_info,
         "hooklift": hooklift_info,
+        "rhythm_feel": rhythm_feel_info,
         "stems": stems_info,
         "transient_sculpt": transient_info,
         "runtime_sec": float(time.time() - t0),
@@ -2857,6 +3210,12 @@ def master(target_path: str, out_path: str, preset: Preset,
             f.write(f"- HookLift enabled: **{result['hooklift'].get('enabled', False)}** (mix={result['hooklift'].get('mix', None)})\n")
             if result['hooklift'].get('auto', False):
                 f.write(f"  - Auto mask percentile: **{result['hooklift'].get('auto_percentile', None)}**\n")
+            f.write(
+                f"- Rhythm-feel polish: **{result['rhythm_feel'].get('enabled', False)}** "
+                f"(intensity={result['rhythm_feel'].get('applied_intensity', None)}, "
+                f"score={result['rhythm_feel'].get('rhythm_feel_score_before', None)}"
+                f"->{result['rhythm_feel'].get('rhythm_feel_score_after', None)})\n"
+            )
             f.write("\n")
 
             f.write("## Stem separation (HT-Demucs)\n")
@@ -2905,8 +3264,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--report", default=None, help="Optional report markdown output.")
     p.add_argument("--preset", default="hi_fi_streaming", choices=list(get_presets().keys()), help="Preset name.")
-    p.add_argument("--no-stems", action="store_true", help="Disable HT-Demucs stem separation (otherwise enabled by preset).")
-    p.add_argument("--stems", action="store_true", help="Force-enable HT-Demucs stem separation (overrides preset).")
+    p.add_argument("--no-stems", action="store_true", help="Disable HT-Demucs stem separation (overrides preset stem_mode).")
+    p.add_argument("--stems", action="store_true", help="Force-enable HT-Demucs stem separation (overrides preset stem_mode).")
     p.add_argument("--demucs-model", default=None, help="Demucs model name (default from preset, e.g., htdemucs).")
     p.add_argument("--demucs-device", default="cpu", help="Demucs device: cpu or cuda (if available).")
     p.add_argument("--demucs-overlap", type=float, default=None, help="Demucs overlap (0.0-0.99).")
@@ -2944,6 +3303,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="Override preset target LUFS (integrated). Example: -12.0")
     p.add_argument("--ceiling", type=float, default=None,
                    help="Override limiter ceiling (dBFS). Example: -1.0 (recommended for streaming)")
+    p.add_argument("--governor-steps", type=int, default=None,
+                   help="Override governor binary-search steps (e.g., 5).")
+    p.add_argument("--governor-gr-limit", type=float, default=None,
+                   help="Override governor gain-reduction ceiling in dB (e.g., -1.8).")
     p.add_argument("--limiter", choices=["v1", "v2"], default="v2",
                    help="Limiter engine override (v2 is more transparent / stable).")
     p.add_argument("--no-limiter", action="store_true",
@@ -2996,8 +3359,10 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
 
     # Stem separation overrides.
     if args.no_stems:
+        updates["stem_mode"] = "off"
         updates["enable_stem_separation"] = False
     if args.stems:
+        updates["stem_mode"] = "on"
         updates["enable_stem_separation"] = True
     if args.demucs_model is not None:
         updates["demucs_model"] = args.demucs_model
@@ -3037,6 +3402,10 @@ def _collect_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         updates["target_lufs"] = float(args.target_lufs)
     if args.ceiling is not None:
         updates["ceiling_dbfs"] = float(args.ceiling)
+    if args.governor_steps is not None:
+        updates["governor_search_steps"] = int(args.governor_steps)
+    if args.governor_gr_limit is not None:
+        updates["governor_gr_limit_db"] = float(args.governor_gr_limit)
     if args.limiter is not None:
         updates["limiter_mode"] = str(args.limiter)
     if args.no_limiter:

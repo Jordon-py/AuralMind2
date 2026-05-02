@@ -1,10 +1,64 @@
-data/*.wav
-data/*.log
-data/complete/
-data/codex_mastered/
-maestro_sessions/
+# AuralMind2 ignore rules
+# Purpose: keep source, docs, tests, and runner manifests visible while excluding
+# heavy generated audio, local env files, caches, SQLite runtime state, and logs.
+# Data shapes: audio exports (*.wav/*.mp3/etc), JSON/DB runtime state, Python cache
+# directories, and local-only environment/config artifacts.
+# Important runtime paths: server.py:3284 premium trap resource,
+# server.py:3424 premium trap prompt, server.py:3787 run_master_job,
+# server.py:3815 job_status, server.py:3987 master_audio, and
+# tools/auralmind_maestro.py:2804 master.
+# Possible bugs: over-broad ignores can hide source fixtures; tracked audio already
+# in Git remains tracked until explicitly removed with git rm.
+# Extensions: 1) add a curated fixtures allowlist for tiny test audio, 2) move
+# release deliverables to a separate artifact store instead of the repo tree.
+
+# Local secrets and environment
 .env
 .venv/
+maestro_sessions/
+
+# Python/editor caches
 __pycache__/
+*.py[cod]
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+
+# Generated audio and DAW sidecars
+*.wav
+*.mp3
+*.flac
+*.aif
+*.aiff
+*.ogg
+*.m4a
+*.asd
+*.reapeaks
+
+# Curated tiny test audio fixtures are the only audio allowed back into Git.
+!tests/fixtures/audio/
+!tests/fixtures/audio/.gitignore
+!tests/fixtures/audio/README.md
+!tests/fixtures/audio/*.wav
+!tests/fixtures/audio/*.flac
+!tests/fixtures/audio/*.mp3
+
+# Runtime logs, state, and generated outputs
+*.log
+server.log
+runtime_validation.json
+sonic_specs.json
+data/*.log
+data/*.md
+data/ui_uploads/
+data/complete/
+data/codex_mastered/
+data/maestro_state.db
+artifacts/
+manifests/
 masters/
+masters_premium_trap20_*/
+Album_Ignorance_is_bliss/
+Ignorance Is Bliss/
+mastering/peaks/
